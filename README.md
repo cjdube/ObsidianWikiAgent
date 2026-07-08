@@ -64,6 +64,39 @@ tool schemas passed to `run_agent`.
    ```
 6. Load the launchd plist (see below).
 
+## Using it day to day
+
+Once a vault is set up and scheduled, this is the actual workflow:
+
+1. **Drop raw material into `<vault>/raw/`.** Notes, transcripts, exported
+   docs — whatever the vault ingests. That's the only manual step; you
+   don't organize it or tell the agent it's there.
+2. **Ingestion runs on its own schedule** (the vault's launchd `.plist`).
+   To see it happen right away instead of waiting — e.g. just after
+   dropping a file in — trigger it on demand:
+   ```bash
+   launchctl start com.cjdube.wikiagent.<vault-name>-ingest
+   ```
+   or run it directly, bypassing launchd entirely:
+   ```bash
+   .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-[vault]
+   ```
+3. **Check what it did.** `<vault>/wiki/log.md` is the agent's own
+   append-only account of what it read, what it changed, and any judgment
+   calls it made (it runs unattended, so it never stops to ask).
+   `logs/wiki_ingest.<vault-name>.log` has the full structured run log if
+   something needs debugging.
+4. **Browse the result in Obsidian.** `<vault>/wiki/` is plain markdown —
+   open the vault normally in the Obsidian app and start from
+   `wiki/index.md`, the table of contents the agent maintains.
+5. **Ask it a question directly**, any time, without waiting for a
+   scheduled run:
+   ```bash
+   .venv/bin/python wiki_query.py --vault ~/Documents/llm-wiki-[vault] "What did we decide about the fall speaker schedule?"
+   ```
+   This is read-only — it answers by citing the specific wiki pages it
+   drew from and never edits anything.
+
 ## Adding a new vault
 
 1. Create the vault folder with `RULES.md`, `raw/`, `wiki/`.
