@@ -2,3 +2,4 @@
 __pycache__/
 config/.env
 logs/*.log
+.DS_Store
