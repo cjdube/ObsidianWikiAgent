@@ -1,19 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Reference template for adding a new vault's scheduled ingest job. Not
-     itself loaded by launchd — copy it to a real <label>.plist, fill in the
-     placeholders, then follow the README's "Adding a new vault" steps. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.cjdube.wikiagent.<VAULT_NAME>-ingest</string>
+    <string>com.cjdube.wikiagent.learnings-ingest</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>~/Projects/ObsidianWikiAgent/.venv/bin/python</string>
         <string>~/Projects/ObsidianWikiAgent/wiki_ingest.py</string>
         <string>--vault</string>
-        <string><ABSOLUTE_PATH_TO_VAULT></string>
+        <string>/Volumes/T7/Obsidian/learnings</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -28,9 +25,9 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>~/Projects/ObsidianWikiAgent/logs/<VAULT_NAME>-ingest.launchd.log</string>
+    <string>~/Projects/ObsidianWikiAgent/logs/learnings-ingest.launchd.log</string>
     <key>StandardErrorPath</key>
-    <string>~/Projects/ObsidianWikiAgent/logs/<VAULT_NAME>-ingest.launchd.log</string>
+    <string>~/Projects/ObsidianWikiAgent/logs/learnings-ingest.launchd.log</string>
 
     <key>RunAtLoad</key>
     <false/>

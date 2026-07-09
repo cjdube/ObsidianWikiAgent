@@ -101,9 +101,23 @@ Once a vault is set up and scheduled, this is the actual workflow:
 
 1. Create the vault folder with `RULES.md`, `raw/`, `wiki/`.
 2. Copy `launchd/template.plist.txt` to a new
-   `com.cjdube.wikiagent.<vault-name>-ingest.plist`, filling in the
-   `--vault` path, `Label`, and log filename.
-3. `cp` it to `~/Library/LaunchAgents/` and `launchctl load` it.
+   `launchd/com.cjdube.wikiagent.<vault-name>-ingest.plist` in this repo,
+   filling in the `--vault` path, `Label`, and log filename. Commit it —
+   the other per-vault plists in `launchd/` are tracked too.
+3. Validate it before loading — a plist with stray text (e.g. anything
+   before the `<?xml ...?>` declaration) parses fine as a copy but fails
+   `launchctl load` with an opaque `Input/output error`:
+   ```bash
+   plutil -lint launchd/com.cjdube.wikiagent.<vault-name>-ingest.plist
+   ```
+4. Copy it into `~/Library/LaunchAgents/` — note the `~`. That's your
+   per-user LaunchAgents directory; `/Library/LaunchAgents` (no `~`) is a
+   different, root-owned system directory, and `cp` there fails with
+   `Permission denied`. Then load it:
+   ```bash
+   cp launchd/com.cjdube.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
+   launchctl load ~/Library/LaunchAgents/com.cjdube.wikiagent.<vault-name>-ingest.plist
+   ```
 
 No Python changes required — this is the whole point of the vault-path
 parameterization in `agent/wiki_tools.py`.
