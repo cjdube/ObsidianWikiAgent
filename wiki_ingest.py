@@ -38,6 +38,13 @@ from agent.wiki_tools import (
 # LocalLLMAgent tasks this loop was copied from).
 MAX_INGEST_ITERATIONS = 30
 
+# The local model intermittently reads a source and then returns a final
+# answer without ever calling a write tool — a transient no-op, not a
+# capacity problem (observed on 2026-05-11, which finally wrote its 14 pages
+# on the 4th identical attempt). Re-attempt a few times in-run before
+# deferring to the next scheduled run.
+MAX_INGEST_ATTEMPTS = 3
+
 UNATTENDED_WRAPPER = """
 
 You are running unattended — there is no human available to discuss takeaways \
@@ -99,36 +106,56 @@ def ingest_vault(vault_path: str, logger) -> int:
 
     for filename in pending:
         logger.info(f"Ingesting '{filename}'")
-        write_counter: list = []
-        dispatch = _build_dispatch(vault_path, write_counter)
-        try:
-            result = run_agent(
-                system_prompt=system_prompt,
-                user_prompt=(
-                    f"Ingest the source file '{filename}' from raw/ per the ingest "
-                    "workflow above: read it, create or update the relevant wiki "
-                    "pages with wiki-links between related concepts, update "
-                    "wiki/index.md, and append a wiki/log.md entry describing what "
-                    "changed."
-                ),
-                tools=INGEST_TOOL_SCHEMAS,
-                dispatch=dispatch,
-                logger=logger,
-                max_iterations=MAX_INGEST_ITERATIONS,
-            )
-            logger.info(f"Agent final response for '{filename}': {result}")
-            if write_counter:
-                mark_ingested(vault_path, filename)
-            else:
-                failures += 1
-                logger.warning(
-                    f"'{filename}' produced no wiki writes (model returned without "
-                    "calling write_wiki_page or append_log) — leaving it unmarked "
-                    "so the next run retries it."
+        wrote = False
+        for attempt in range(1, MAX_INGEST_ATTEMPTS + 1):
+            # Fresh dispatch + write_counter per attempt — a retried source is
+            # re-processed from scratch, which is safe because a no-write
+            # attempt left nothing behind to duplicate.
+            write_counter: list = []
+            dispatch = _build_dispatch(vault_path, write_counter)
+            try:
+                result = run_agent(
+                    system_prompt=system_prompt,
+                    user_prompt=(
+                        f"Ingest the source file '{filename}' from raw/ per the ingest "
+                        "workflow above: read it, create or update the relevant wiki "
+                        "pages with wiki-links between related concepts, update "
+                        "wiki/index.md, and append a wiki/log.md entry describing what "
+                        "changed."
+                    ),
+                    tools=INGEST_TOOL_SCHEMAS,
+                    dispatch=dispatch,
+                    logger=logger,
+                    max_iterations=MAX_INGEST_ITERATIONS,
                 )
-        except Exception as e:
+                logger.info(
+                    f"Agent final response for '{filename}' "
+                    f"(attempt {attempt}/{MAX_INGEST_ATTEMPTS}): {result}"
+                )
+            except Exception as e:
+                logger.exception(
+                    f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' "
+                    f"raised: {e}"
+                )
+                continue
+
+            if write_counter:
+                wrote = True
+                break
+            logger.warning(
+                f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' produced "
+                "no wiki writes (model returned without calling write_wiki_page or "
+                "append_log)."
+            )
+
+        if wrote:
+            mark_ingested(vault_path, filename)
+        else:
             failures += 1
-            logger.exception(f"Failed to ingest '{filename}': {e}")
+            logger.warning(
+                f"'{filename}' produced no wiki writes after {MAX_INGEST_ATTEMPTS} "
+                "attempts — leaving it unmarked so the next run retries it."
+            )
 
     return 1 if failures else 0
 

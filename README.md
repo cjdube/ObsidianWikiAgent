@@ -85,7 +85,11 @@ Once a vault is set up and scheduled, this is the actual workflow:
    append-only account of what it read, what it changed, and any judgment
    calls it made (it runs unattended, so it never stops to ask).
    `logs/wiki_ingest.<vault-name>.log` has the full structured run log if
-   something needs debugging.
+   something needs debugging. A source is only marked done once it actually
+   writes pages; if the local model reads a file but returns without writing
+   (a transient no-op that happens on dense sources), the run re-attempts it
+   a few times, then leaves it for the next scheduled run — so a stuck file
+   clears itself without intervention.
 4. **Browse the result in Obsidian.** `<vault>/wiki/` is plain markdown —
    open the vault normally in the Obsidian app and start from
    `wiki/index.md`, the table of contents the agent maintains.
