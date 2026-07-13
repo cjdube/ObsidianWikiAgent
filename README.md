@@ -18,6 +18,9 @@ knows about vaults, not calendars or email.
 launchd (per-vault .plist, timed)
    -> python wiki_ingest.py --vault <path>
        -> reads <vault>/RULES.md as the system prompt
+       -> sorts freshly dropped raw/ files into the subdirectories the
+          vault declares under "## Raw folders" (local model picks the
+          folder per file; no-op for vaults that declare none)
        -> finds raw/ sources not yet in wiki/.ingested.json
        -> for each: tool-calling loop against Ollama's /api/chat
           (read_raw_file, read/write_wiki_page, read/update_index,

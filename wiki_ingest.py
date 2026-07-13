@@ -18,14 +18,17 @@ import sys
 from pathlib import Path
 
 from agent.common import setup_logger
-from agent.loop import run_agent
+from agent.loop import complete_text, run_agent
 from agent.wiki_tools import (
     INGEST_TOOL_SCHEMAS,
     append_log,
     get_ingested_sources,
     list_raw_files,
+    list_unsorted_raw_files,
     list_wiki_pages,
     mark_ingested,
+    move_raw_file,
+    parse_raw_folders,
     read_index,
     read_raw_file,
     read_wiki_page,
@@ -44,6 +47,18 @@ MAX_INGEST_ITERATIONS = 30
 # on the 4th identical attempt). Re-attempt a few times in-run before
 # deferring to the next scheduled run.
 MAX_INGEST_ATTEMPTS = 3
+
+# A file the sort step can't confidently place goes here rather than blocking
+# ingestion — but only if the vault actually declares a "misc" folder.
+SORT_FALLBACK_FOLDER = "misc"
+
+SORT_SYSTEM_PROMPT = """\
+You sort one dropped file into exactly one destination folder.
+
+You are given the folder names, each with a short description of what belongs \
+in it, plus the file's name and the start of its content. Reply with ONLY the \
+destination folder name, exactly as it appears in the list, and nothing else — \
+no punctuation, no explanation."""
 
 UNATTENDED_WRAPPER = """
 
@@ -90,9 +105,87 @@ def _load_rules(vault_path: str) -> str:
     return rules_path.read_text(encoding="utf-8")
 
 
+def _classify_raw_file(filename: str, content: str, folders: list[dict]) -> str | None:
+    """Ask the local model which declared folder a file belongs in, returning
+    the matched folder name (as declared) or None if the reply matches none."""
+    folder_lines = "\n".join(f"- {f['name']}: {f['description']}" for f in folders)
+    system = f"{SORT_SYSTEM_PROMPT}\n\nFolders:\n{folder_lines}"
+    user = (
+        f"Filename: {filename}\n\n"
+        f"Content (may be truncated):\n{content[:2000]}"
+    )
+    reply = complete_text(system_prompt=system, user_prompt=user).strip().lower()
+    by_lower = {f["name"].lower(): f["name"] for f in folders}
+
+    if reply in by_lower:
+        return by_lower[reply]
+    tokens = reply.split()
+    first = tokens[0].strip(".,:;—-") if tokens else ""
+    if first in by_lower:
+        return by_lower[first]
+    for lower, declared in by_lower.items():
+        if lower in reply:
+            return declared
+    return None
+
+
+def sort_raw_files(vault_path: str, logger) -> None:
+    """Organize files dropped into raw/ into the subdirectories the vault
+    declares in its RULES.md '## Raw folders' section, using the local model
+    to classify each. A no-op for vaults that declare no such section.
+
+    Runs before ingestion so the rest of the run only ever sees sorted files."""
+    folders = parse_raw_folders(vault_path)
+    if not folders:
+        logger.info(
+            "No '## Raw folders' section in RULES.md — skipping raw sort step."
+        )
+        return
+
+    unsorted = list_unsorted_raw_files(vault_path).get("files", [])
+    if not unsorted:
+        logger.info("No unsorted files in raw/ — nothing to sort.")
+        return
+
+    folder_names = {f["name"] for f in folders}
+    fallback = SORT_FALLBACK_FOLDER if SORT_FALLBACK_FOLDER in folder_names else None
+
+    for filename in unsorted:
+        content = read_raw_file(vault_path, filename).get("content", "")
+        try:
+            choice = _classify_raw_file(filename, content, folders)
+        except Exception as e:
+            logger.exception(f"Sorting '{filename}' raised: {e}")
+            choice = None
+
+        if choice is None:
+            if fallback is None:
+                logger.warning(
+                    f"Could not classify '{filename}' and no '{SORT_FALLBACK_FOLDER}' "
+                    "folder is declared — leaving it in place."
+                )
+                continue
+            logger.warning(
+                f"Could not classify '{filename}' — defaulting to '{fallback}'."
+            )
+            choice = fallback
+
+        result = move_raw_file(vault_path, filename, choice)
+        if "error" in result:
+            logger.warning(
+                f"Failed to sort '{filename}' into '{choice}': {result['error']}"
+            )
+        else:
+            logger.info(f"Sorted '{filename}' -> {result['moved']}")
+
+
 def ingest_vault(vault_path: str, logger) -> int:
     rules = _load_rules(vault_path)
     system_prompt = rules + UNATTENDED_WRAPPER
+
+    # Organize freshly dropped files into their subdirectories first, so the
+    # ingest loop below only ever encounters sorted sources.
+    sort_raw_files(vault_path, logger)
 
     raw_files = list_raw_files(vault_path).get("files", [])
     already_ingested = set(get_ingested_sources(vault_path))

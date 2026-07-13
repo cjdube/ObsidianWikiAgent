@@ -8,7 +8,9 @@ Vault layout expected:
     <vault>/RULES.md         -- the wiki's own rules (folder structure, page
                                  format, citation rules) — read as-is by the
                                  caller, not touched here.
-    <vault>/raw/              -- source documents, never modified
+    <vault>/raw/              -- source documents (content never modified;
+                                 the pre-ingest sort step may move them into
+                                 raw/<folder>/ subdirectories per RULES.md)
     <vault>/wiki/             -- maintained pages
     <vault>/wiki/index.md     -- table of contents
     <vault>/wiki/log.md       -- append-only operation log
@@ -21,6 +23,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -45,6 +48,41 @@ def _safe_page_path(vault_path: str, name: str) -> Path:
 
 
 def list_raw_files(vault_path: str) -> dict:
+    """Every raw source, by basename, wherever it sits under raw/.
+
+    Recurses into the sort subdirectories (daily-*, misc, ...) so files moved
+    there by the pre-ingest sort step are still seen. Returns bare basenames —
+    not relative paths — so the identity a file is tracked by in
+    .ingested.json is unchanged by sorting and nothing gets re-ingested."""
+    raw_dir = _raw_dir(vault_path)
+    if not raw_dir.exists():
+        return {"files": []}
+    names = {
+        p.name for p in raw_dir.rglob("*")
+        if p.is_file() and not p.name.startswith(".")
+    }
+    return {"files": sorted(names)}
+
+
+def read_raw_file(vault_path: str, filename: str) -> dict:
+    raw_dir = _raw_dir(vault_path)
+    path = raw_dir / filename
+    if not path.is_file():
+        # Sorted into a subdirectory since it was last at the top level; find
+        # it by basename anywhere under raw/.
+        matches = [p for p in raw_dir.rglob(filename) if p.is_file()]
+        if not matches:
+            return {"error": f"raw file '{filename}' not found"}
+        path = matches[0]
+    try:
+        return {"content": path.read_text(encoding="utf-8", errors="replace")}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def list_unsorted_raw_files(vault_path: str) -> dict:
+    """Files sitting directly in raw/, i.e. dropped in but not yet sorted into
+    one of the vault's subdirectories. These are the sort step's input."""
     raw_dir = _raw_dir(vault_path)
     if not raw_dir.exists():
         return {"files": []}
@@ -55,14 +93,53 @@ def list_raw_files(vault_path: str) -> dict:
     return {"files": files}
 
 
-def read_raw_file(vault_path: str, filename: str) -> dict:
-    path = _raw_dir(vault_path) / filename
-    if not path.is_file():
+def move_raw_file(vault_path: str, filename: str, folder: str) -> dict:
+    """Move raw/<filename> into the raw/<folder>/ subdirectory, creating it if
+    needed. Rejects any folder that isn't a plain subdirectory name inside
+    raw/ (no path separators, no escaping via '..')."""
+    if "/" in folder or "\\" in folder or folder in ("", ".", ".."):
+        return {"error": f"invalid destination folder '{folder}'"}
+    raw_dir = _raw_dir(vault_path).resolve()
+    src = raw_dir / filename
+    if not src.is_file():
         return {"error": f"raw file '{filename}' not found"}
-    try:
-        return {"content": path.read_text(encoding="utf-8", errors="replace")}
-    except Exception as e:
-        return {"error": str(e)}
+    dest_dir = (raw_dir / folder).resolve()
+    if raw_dir not in dest_dir.parents:
+        return {"error": f"destination '{folder}' resolves outside raw/"}
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / src.name
+    src.rename(dest)
+    return {"moved": f"{folder}/{src.name}"}
+
+
+def parse_raw_folders(vault_path: str) -> list[dict]:
+    """The sort destinations declared in the vault's RULES.md '## Raw folders'
+    section, as [{"name", "description"}]. Each bullet is `- <name> <desc>`;
+    the first whitespace-delimited token is the folder name (so hyphenated
+    names like daily-youtube are fine) and the rest is the description used to
+    tell the model what belongs there. Returns [] when the vault declares no
+    such section — the sort step is opt-in per vault."""
+    rules_path = Path(vault_path) / "RULES.md"
+    if not rules_path.is_file():
+        return []
+    folders: list[dict] = []
+    in_section = False
+    for line in rules_path.read_text(encoding="utf-8").splitlines():
+        heading = re.match(r"^#{1,6}\s+(.*)$", line)
+        if heading:
+            in_section = heading.group(1).strip().lower() == "raw folders"
+            continue
+        if not in_section:
+            continue
+        bullet = re.match(r"^\s*[-*]\s+(\S+)\s*(.*)$", line)
+        if not bullet:
+            continue
+        name = bullet.group(1).strip().rstrip(":")
+        desc = bullet.group(2).strip().lstrip("—-:").strip()
+        if "/" in name or name in (".", ".."):
+            continue
+        folders.append({"name": name, "description": desc})
+    return folders
 
 
 def list_wiki_pages(vault_path: str) -> dict:
