@@ -10,7 +10,7 @@
         <string>~/Projects/ObsidianWikiAgent/.venv/bin/python</string>
         <string>~/Projects/ObsidianWikiAgent/wiki_ingest.py</string>
         <string>--vault</string>
-        <string>/Volumes/T7/Obsidian/learnings</string>
+        <string>~/Documents/llm-wiki-learnings</string>
     </array>
 
     <key>WorkingDirectory</key>
