@@ -143,12 +143,19 @@ def parse_raw_folders(vault_path: str) -> list[dict]:
 
 
 def list_wiki_pages(vault_path: str) -> dict:
+    """Every real wiki page. Skips dotfiles: a vault on any filesystem without
+    native extended attributes (exFAT/NTFS drives, network shares) accumulates
+    macOS '._name.md' AppleDouble sidecars, which match *.md and would
+    otherwise be listed and indexed as pages."""
     wiki_dir = _wiki_dir(vault_path)
     if not wiki_dir.exists():
         return {"pages": []}
     pages = sorted(
         p.name for p in wiki_dir.iterdir()
-        if p.is_file() and p.suffix == ".md" and p.name not in ("index.md", "log.md")
+        if p.is_file()
+        and p.suffix == ".md"
+        and not p.name.startswith(".")
+        and p.name not in ("index.md", "log.md")
     )
     return {"pages": pages}
 
@@ -180,12 +187,92 @@ def read_index(vault_path: str) -> dict:
     return {"content": path.read_text(encoding="utf-8")}
 
 
+UNFILED_HEADING = "## Unfiled"
+
+
+def _linked_page_names(content: str) -> set[str]:
+    """Page names already linked from index content, as bare stems —
+    [[foo]], [[foo.md]], [[foo|alias]] and [[foo#section]] all mean foo."""
+    names = set()
+    for target in re.findall(r"\[\[([^\]]+)\]\]", content):
+        name = target.split("|", 1)[0].split("#", 1)[0].strip()
+        if name.endswith(".md"):
+            name = name[:-3]
+        if name:
+            names.add(name)
+    return names
+
+
+def _strip_unfiled(content: str) -> str:
+    """Drop any previously appended Unfiled section so it is recomputed rather
+    than accumulating. A page the model has since filed under a real heading
+    just stops reappearing here."""
+    kept, skipping = [], False
+    for line in content.splitlines():
+        if line.strip() == UNFILED_HEADING:
+            skipping = True
+            continue
+        if skipping and line.startswith("## "):
+            skipping = False
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _page_summary(vault_path: str, name: str) -> str:
+    """The page's own '**Summary**:' line, used as its index description.
+
+    Summaries contain wiki-links of their own, which are flattened to plain
+    text: carried through verbatim they would add links to the index for
+    concepts that have no page (breaking them), and would let a page count as
+    linked merely because another entry's description mentions it."""
+    try:
+        path = _safe_page_path(vault_path, name)
+    except ValueError:
+        return ""
+    if not path.is_file():
+        return ""
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("**Summary**:"):
+            summary = line[len("**Summary**:"):].strip()
+            return re.sub(
+                r"\[\[([^\]]+)\]\]",
+                lambda m: m.group(1).split("|", 1)[-1].strip(),
+                summary,
+            )
+    return ""
+
+
 def update_index(vault_path: str, content: str) -> dict:
+    """Overwrite wiki/index.md, guaranteeing every wiki page stays linked.
+
+    The model authors the curated sections, but it rewrites the index from
+    memory and silently drops pages — including ones it created moments
+    earlier in the same run. A dropped page is never re-linked on its own,
+    because its source is already marked ingested and won't be reprocessed, so
+    the loss is permanent (observed 2026-07-14: 73 of 160 pages orphaned).
+    Completeness is therefore enforced here rather than asked for in the
+    prompt: any page missing from `content` is appended under Unfiled.
+    """
     wiki_dir = _wiki_dir(vault_path)
     wiki_dir.mkdir(parents=True, exist_ok=True)
+
+    body = _strip_unfiled(content).rstrip("\n")
+    linked = _linked_page_names(body)
+    unfiled = [
+        page[: -len(".md")] for page in list_wiki_pages(vault_path)["pages"]
+        if page[: -len(".md")] not in linked
+    ]
+    if unfiled:
+        entries = "\n".join(
+            f"- [[{name}]] {_page_summary(vault_path, name)}".rstrip()
+            for name in unfiled
+        )
+        body += f"\n\n{UNFILED_HEADING}\n\n{entries}"
+
     path = wiki_dir / "index.md"
-    path.write_text(content, encoding="utf-8")
-    return {"written": "index.md"}
+    path.write_text(body + "\n", encoding="utf-8")
+    return {"written": "index.md", "unfiled": len(unfiled)}
 
 
 def append_log(vault_path: str, entry: str) -> dict:
@@ -285,7 +372,7 @@ UPDATE_INDEX_SCHEMA = {
     "type": "function",
     "function": {
         "name": "update_index",
-        "description": "Overwrite wiki/index.md with the given full content (include every page, not just new ones).",
+        "description": "Overwrite wiki/index.md with the given full content (include every page, not just new ones). Any page you leave out is appended under an '## Unfiled' heading rather than dropped — move those into the section they belong in.",
         "parameters": {
             "type": "object",
             "properties": {
