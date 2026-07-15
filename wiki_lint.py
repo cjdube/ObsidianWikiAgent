@@ -1,0 +1,270 @@
+"""Audit a vault's wiki and report problems, on demand.
+
+Report-only by design: this never writes to the vault. RULES.md asks for
+"findings as a numbered list with suggested fixes", and the fixes that matter
+need a human — deciding which of two overlapping pages survives is judgment,
+not mechanics.
+
+Two passes, split by what each is actually good at:
+
+  Structural checks run in Python. Link integrity, orphans, index
+  completeness and page format are exact, enumerable facts over every page.
+  Asking a model to enumerate 81 pages correctly is what produced the orphaned
+  index in the first place (see update_index in agent/wiki_tools.py), so these
+  run as code: instant, free, and they cannot miss one.
+
+  --deep adds a model pass for the checks code cannot do: contradictions
+  between pages, two pages covering one concept under different names, pages
+  whose subject is out of scope, and claims a newer source has overtaken. The
+  model receives the structural findings as context so it does not re-derive
+  them.
+
+Usage:
+    python wiki_lint.py --vault ~/Documents/llm-wiki-learnings
+    python wiki_lint.py --vault ~/Documents/llm-wiki-learnings --deep
+"""
+
+import argparse
+import datetime
+import functools
+import re
+import sys
+from pathlib import Path
+
+from agent.loop import run_agent
+from agent.wiki_tools import (
+    QUERY_TOOL_SCHEMAS,
+    _linked_page_names,
+    list_raw_files,
+    list_wiki_pages,
+    read_index,
+    read_wiki_page,
+)
+
+RESERVED = ("index.md", "log.md")
+
+LINT_WRAPPER = """
+
+You are auditing this wiki. A structural pass has already run in code and
+found every broken link, orphan page, index gap and page-format violation —
+those are listed below, and you must NOT repeat them or re-check them.
+
+Your job is only the checks that need judgment:
+
+1. Contradictions — two pages asserting incompatible things.
+2. Duplicate concepts — two pages covering the same subject under different
+   names (they will not share a title, or the structural pass would have
+   caught them).
+3. Out-of-scope pages — subjects the Scope section above excludes.
+4. Outdated claims — a claim a later source has superseded.
+
+Read wiki/index.md first, then read the pages you need. Report findings as a
+numbered list, each naming the specific pages and a suggested fix. Report only
+what you actually verified by reading the pages — if you find nothing in a
+category, say so rather than inventing something. Do not write to the wiki."""
+
+
+def _pages(vault_path: str) -> dict[str, str]:
+    """{slug: content} for every real wiki page."""
+    wiki_dir = Path(vault_path) / "wiki"
+    return {
+        name[: -len(".md")]: (wiki_dir / name).read_text(encoding="utf-8", errors="replace")
+        for name in list_wiki_pages(vault_path)["pages"]
+    }
+
+
+def _field(content: str, label: str) -> str | None:
+    for line in content.splitlines():
+        if line.startswith(f"**{label}**:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def check_links(pages: dict[str, str]) -> list[str]:
+    """Wiki-links pointing at pages that do not exist, and self-links."""
+    findings = []
+    for slug, content in sorted(pages.items()):
+        for target in sorted(_linked_page_names(content)):
+            if target == slug:
+                findings.append(f"{slug}.md links to itself — remove the self-link.")
+            elif target not in pages:
+                findings.append(
+                    f"{slug}.md links to [[{target}]], which has no page — "
+                    f"create it, repoint the link, or make it plain text."
+                )
+    return findings
+
+
+def check_orphans(pages: dict[str, str]) -> list[str]:
+    """Pages nothing links to. The index does not count: being listed in the
+    table of contents is not the same as being reachable from related work."""
+    inbound = {slug: set() for slug in pages}
+    for slug, content in pages.items():
+        for target in _linked_page_names(content):
+            if target in inbound and target != slug:
+                inbound[target].add(slug)
+    return [
+        f"{slug}.md is an orphan — no other page links to it. Link it from a "
+        f"related page, or reconsider whether it earns its own page."
+        for slug in sorted(pages)
+        if not inbound[slug]
+    ]
+
+
+def check_index(vault_path: str, pages: dict[str, str]) -> list[str]:
+    """Index completeness in both directions. update_index guarantees every
+    page is listed, but it never prunes links to pages that were deleted."""
+    linked = _linked_page_names(read_index(vault_path)["content"])
+    findings = [
+        f"{slug}.md is not linked from index.md — update_index should have "
+        f"caught this; check it ran."
+        for slug in sorted(set(pages) - linked)
+    ]
+    findings += [
+        f"index.md links to [[{name}]], which has no page — the page was "
+        f"deleted and the index entry left behind; remove the entry."
+        for name in sorted(linked - set(pages))
+    ]
+    return findings
+
+
+def check_format(vault_path: str, pages: dict[str, str], today: datetime.date) -> list[str]:
+    """The page format RULES.md requires — the defect classes a weaker model
+    reliably produces: slug-as-title, placeholder and future dates, and
+    citations to sources that do not exist."""
+    raw = set(list_raw_files(vault_path)["files"])
+    findings = []
+    for slug, content in sorted(pages.items()):
+        title = next((l[2:].strip() for l in content.splitlines() if l.startswith("# ")), None)
+        if not title:
+            findings.append(f"{slug}.md has no '# Title' heading.")
+        elif title == slug:
+            findings.append(
+                f"{slug}.md uses its slug as the title ('# {title}') — "
+                f"give it a real human-readable title."
+            )
+
+        for label in ("Summary", "Sources", "Last updated"):
+            if _field(content, label) is None:
+                findings.append(f"{slug}.md is missing its '**{label}**:' line.")
+
+        updated = _field(content, "Last updated")
+        if updated is not None:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated):
+                findings.append(
+                    f"{slug}.md has a non-ISO 'Last updated' ({updated!r}) — "
+                    f"use a plain date like {today.isoformat()}."
+                )
+            elif datetime.date.fromisoformat(updated) > today:
+                findings.append(
+                    f"{slug}.md is dated {updated}, in the future — "
+                    f"the model invented a date."
+                )
+
+        sources = _field(content, "Sources")
+        if sources:
+            for src in (s.strip().strip("[]`") for s in sources.split(",")):
+                if not src:
+                    continue
+                if "/" in src:
+                    findings.append(
+                        f"{slug}.md cites '{src}' with a directory prefix — "
+                        f"cite the bare filename '{Path(src).name}'."
+                    )
+                elif src not in raw:
+                    findings.append(
+                        f"{slug}.md cites '{src}', which is not a file in raw/ — "
+                        f"the citation is invented or the source was removed."
+                    )
+    return findings
+
+
+def check_duplicate_titles(pages: dict[str, str]) -> list[str]:
+    """Two pages with the same title are the same page. Concepts duplicated
+    under *different* titles need judgment and are left to the --deep pass."""
+    by_title: dict[str, list[str]] = {}
+    for slug, content in pages.items():
+        title = next((l[2:].strip() for l in content.splitlines() if l.startswith("# ")), None)
+        if title:
+            by_title.setdefault(title.lower(), []).append(slug)
+    return [
+        f"{' and '.join(f'{s}.md' for s in sorted(slugs))} share the title "
+        f"'{title}' — merge them and redirect inbound links."
+        for title, slugs in sorted(by_title.items())
+        if len(slugs) > 1
+    ]
+
+
+def structural_findings(vault_path: str, today: datetime.date = None) -> dict[str, list[str]]:
+    today = today or datetime.date.today()
+    pages = _pages(vault_path)
+    return {
+        "Broken and self links": check_links(pages),
+        "Orphan pages": check_orphans(pages),
+        "Index integrity": check_index(vault_path, pages),
+        "Page format": check_format(vault_path, pages, today),
+        "Duplicate titles": check_duplicate_titles(pages),
+    }
+
+
+def _render(findings: dict[str, list[str]]) -> tuple[str, int]:
+    lines, n = [], 0
+    for section, items in findings.items():
+        if not items:
+            continue
+        lines.append(f"\n## {section}\n")
+        for item in items:
+            n += 1
+            lines.append(f"{n}. {item}")
+    return "\n".join(lines), n
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--vault", required=True, help="Path to the Obsidian vault.")
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Also run the model pass for contradictions, duplicate concepts, "
+             "out-of-scope pages and outdated claims.",
+    )
+    args = parser.parse_args()
+
+    rules_path = Path(args.vault) / "RULES.md"
+    if not rules_path.is_file():
+        print(f"error: {rules_path} not found", file=sys.stderr)
+        return 1
+
+    findings = structural_findings(args.vault)
+    report, count = _render(findings)
+
+    print(f"# Wiki lint — {Path(args.vault).name}")
+    print(f"\n{len(_pages(args.vault))} pages checked.")
+    if count:
+        print(report)
+    else:
+        print("\nNo structural problems found.")
+
+    if args.deep:
+        print("\n---\n\n## Judgment pass\n")
+        context = report if count else "The structural pass found no problems."
+        dispatch = {
+            "list_wiki_pages": functools.partial(list_wiki_pages, args.vault),
+            "read_wiki_page": functools.partial(read_wiki_page, args.vault),
+            "read_index": functools.partial(read_index, args.vault),
+        }
+        print(run_agent(
+            system_prompt=rules_path.read_text(encoding="utf-8") + LINT_WRAPPER
+            + "\n\nStructural findings already reported (do not repeat these):\n"
+            + context,
+            user_prompt="Audit the wiki and report your findings.",
+            tools=QUERY_TOOL_SCHEMAS,
+            dispatch=dispatch,
+            max_iterations=30,
+        ))
+
+    return 1 if count else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Weekly audit of the learnings vault. Read-only: wiki_lint.py never writes
+     to the vault, so this is safe to run unattended — the report lands in the
+     log for a human to act on.
+
+     Runs Sunday at 10:00, after that morning's 09:00 ingest, so it audits a
+     full week of new pages.
+
+     LLM_PROVIDER=gemini is set here and only here: the daily ingest has no
+     EnvironmentVariables and so keeps the local ollama default. The judgment
+     pass is the one job where model quality decides whether the findings are
+     worth reading, and it runs once a week. GEMINI_API_KEY comes from
+     config/.env via load_dotenv, not from this file. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cjdube.wikiagent.learnings-lint</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>~/Projects/ObsidianWikiAgent/.venv/bin/python</string>
+        <string>~/Projects/ObsidianWikiAgent/wiki_lint.py</string>
+        <string>--vault</string>
+        <string>~/Documents/llm-wiki-learnings</string>
+        <string>--deep</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>~/Projects/ObsidianWikiAgent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LLM_PROVIDER</key>
+        <string>gemini</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>~/Projects/ObsidianWikiAgent/logs/learnings-lint.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>~/Projects/ObsidianWikiAgent/logs/learnings-lint.launchd.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

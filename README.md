@@ -103,6 +103,26 @@ Once a vault is set up and scheduled, this is the actual workflow:
    ```
    This is read-only — it answers by citing the specific wiki pages it
    drew from and never edits anything.
+6. **Audit the wiki** for problems that creep in over time:
+   ```bash
+   .venv/bin/python wiki_lint.py --vault ~/Documents/llm-wiki-[vault]
+   ```
+   Report-only — it never edits the vault. Structural checks (broken and
+   self links, orphan pages, index gaps, page format, duplicate titles) run
+   in Python, so they are instant, free, and cannot miss a page. Exits
+   non-zero when it finds something.
+
+   Add `--deep` for the checks code can't do — contradictions between pages,
+   one concept split across two names, out-of-scope pages, and claims a newer
+   source has overtaken. That pass calls the model, so it costs a couple of
+   minutes.
+
+   The learnings vault also audits itself weekly
+   (`launchd/com.cjdube.wikiagent.learnings-lint.plist`, Sunday 10:00,
+   after that morning's ingest); its report lands in
+   `logs/learnings-lint.launchd.log`. That job sets `LLM_PROVIDER=gemini`
+   because the judgment pass is where model quality decides whether the
+   findings are worth reading — the daily ingests stay on the local default.
 
 ## Adding a new vault
 
