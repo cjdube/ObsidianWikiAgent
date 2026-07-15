@@ -202,8 +202,17 @@ def ingest_vault(vault_path: str, logger) -> int:
         wrote = False
         for attempt in range(1, MAX_INGEST_ATTEMPTS + 1):
             # Fresh dispatch + write_counter per attempt — a retried source is
-            # re-processed from scratch, which is safe because a no-write
-            # attempt left nothing behind to duplicate.
+            # re-processed from scratch. That is safe for the no-op failure
+            # this was written for (the model answers without calling a tool,
+            # so nothing was written), and for page writes generally, since
+            # write_wiki_page and update_index overwrite by name.
+            #
+            # It is NOT fully safe once the model call can fail *mid-loop*,
+            # which a remote provider makes possible (a Gemini 503 that
+            # outlasts the backoff in agent/loop.py). An attempt that wrote
+            # pages and appended to log.md before dying will, on retry,
+            # re-append: append_log is the one non-idempotent tool. The cost
+            # is a duplicate ledger entry, not lost or corrupted pages.
             write_counter: list = []
             dispatch = _build_dispatch(vault_path, write_counter)
             try:
