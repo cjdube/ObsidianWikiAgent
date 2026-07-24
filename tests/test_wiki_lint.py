@@ -167,6 +167,15 @@ def test_structural_findings_accepts_prebuilt_pages(vault):
     assert findings["Orphan pages"]  # the lone page links to nothing
 
 
+def test_main_header_is_dated(vault, monkeypatch, capsys):
+    # Each run in the appended launchd log must be self-dating.
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
+    wl.main()
+    out = capsys.readouterr().out
+    today = datetime.date.today().isoformat()
+    assert f"# Wiki lint — {vault.root.name} — {today}" in out
+
+
 def test_main_clean_vault_returns_zero(vault, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
     assert wl.main() == 0
@@ -178,3 +187,66 @@ def test_main_dirty_vault_returns_one(vault, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
     assert wl.main() == 1
     assert "orphan" in capsys.readouterr().out
+
+
+# --- --fix (safe, mechanical auto-fixes only) ------------------------------
+
+
+def test_apply_safe_fixes_strips_self_links(vault):
+    vault.page("a", "# A\n\nSee [[a]] and [[a|myself]] and [[b]].\n")
+    vault.page("b", "# B\n")
+    pages = wl._pages(vault.path)
+    changes = wl.apply_safe_fixes(vault.path, pages)
+    content = (vault.root / "wiki" / "a.md").read_text()
+    assert "[[a]]" not in content            # self-link removed
+    assert "[[a|myself]]" not in content
+    assert "myself" in content               # alias preserved as plain text
+    assert "[[b]]" in content                # link to another real page kept
+    assert any("a.md" in c for c in changes)
+
+
+def test_apply_safe_fixes_delinks_dead_index_links(vault):
+    vault.page("real", good_page())
+    vault.index("# Index\n\n- [[real]] keep me\n- [[ghost]] dead entry\n")
+    pages = wl._pages(vault.path)
+    wl.apply_safe_fixes(vault.path, pages)
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "[[real]]" in index               # valid TOC link kept
+    assert "[[ghost]]" not in index          # dead link removed
+    assert "dead entry" in index             # description text preserved
+
+
+def test_apply_safe_fixes_leaves_judgment_items_alone(vault):
+    # Broken page-body links are create-vs-delink calls; orphans are judgment.
+    # --fix must touch neither.
+    vault.raw("note.txt")
+    vault.page("orphan", good_page())
+    vault.page("linker", good_page() + "\nsee [[missing-concept]]\n")
+    pages = wl._pages(vault.path)
+    changes = wl.apply_safe_fixes(vault.path, pages)
+    linker = (vault.root / "wiki" / "linker.md").read_text()
+    assert "[[missing-concept]]" in linker   # broken body link untouched
+    assert changes == []                     # nothing mechanical to fix
+
+
+def test_apply_safe_fixes_clean_vault_no_changes(vault):
+    vault.page("a", "# A\n\n[[b]]\n")
+    vault.page("b", "# B\n\n[[a]]\n")
+    assert wl.apply_safe_fixes(vault.path, wl._pages(vault.path)) == []
+
+
+def test_main_fix_applies_then_reports_remaining(vault, monkeypatch, capsys):
+    vault.raw("note.txt")
+    vault.page("a", good_page(title="A") + "\nsee [[a]]\n")   # self-link: fixable
+    vault.page("orphan", good_page(title="Orphan"))            # orphan: judgment
+    vault.index("# Index\n\n- [[a]]\n- [[orphan]]\n")
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path, "--fix"])
+    rc = wl.main()
+    out = capsys.readouterr().out
+    # The self-link was fixed on disk...
+    assert "[[a]]" not in (vault.root / "wiki" / "a.md").read_text()
+    # ...and the fix was reported...
+    assert "self-link" in out.lower()
+    # ...while the judgment item still surfaces and drives a nonzero exit.
+    assert "orphan.md is an orphan" in out
+    assert rc == 1

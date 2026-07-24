@@ -1,9 +1,11 @@
 """Audit a vault's wiki and report problems, on demand.
 
-Report-only by design: this never writes to the vault. RULES.md asks for
-"findings as a numbered list with suggested fixes", and the fixes that matter
-need a human — deciding which of two overlapping pages survives is judgment,
-not mechanics.
+Report-only by default: without --fix it never writes to the vault. RULES.md
+asks for "findings as a numbered list with suggested fixes", and the fixes
+that matter need a human — deciding which of two overlapping pages survives is
+judgment, not mechanics. The opt-in --fix flag applies only the provably-safe,
+mechanical subset (stripping self-links, de-linking dead index entries) and
+leaves every judgment call untouched.
 
 Two passes, split by what each is actually good at:
 
@@ -22,6 +24,7 @@ Two passes, split by what each is actually good at:
 Usage:
     python wiki_lint.py --vault ~/Documents/llm-wiki-learnings
     python wiki_lint.py --vault ~/Documents/llm-wiki-learnings --deep
+    python wiki_lint.py --vault ~/Documents/llm-wiki-learnings --fix
 """
 
 import argparse
@@ -34,6 +37,7 @@ from pathlib import Path
 from agent.loop import run_agent
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
+    _delink_broken,
     _linked_page_names,
     list_raw_files,
     list_wiki_pages,
@@ -221,6 +225,56 @@ def structural_findings(
     }
 
 
+def _strip_self_links(content: str, slug: str) -> tuple[str, int]:
+    """De-link any link a page makes to itself, returning the cleaned content
+    and the count removed. A page linking to itself is never meaningful, so the
+    link is flattened to its plain display text (the alias if one was given)."""
+    count = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal count
+        target = m.group(1).split("|", 1)[0].split("#", 1)[0].strip()
+        if target.endswith(".md"):
+            target = target[:-3]
+        if target != slug:
+            return m.group(0)
+        count += 1
+        return m.group(1).split("|", 1)[-1].strip()
+
+    return re.sub(r"\[\[([^\]]+)\]\]", repl, content), count
+
+
+def apply_safe_fixes(vault_path: str, pages: dict[str, str]) -> list[str]:
+    """Apply only the provably-safe, mechanical fixes and return a log of what
+    changed. This is the one place wiki_lint writes to the vault, gated behind
+    --fix. Every judgment call — orphans, duplicate concepts, broken body links
+    (create-vs-delink), bad dates, invented citations — is deliberately left
+    for a human. `pages` is updated in place to reflect the writes.
+
+    Two fixes qualify as safe:
+      1. Self-links — a page linking to itself is never meaningful.
+      2. Dead index links — a table-of-contents entry pointing at no real page
+         (reusing the same de-linking the ingest guard applies)."""
+    wiki_dir = Path(vault_path) / "wiki"
+    changes: list[str] = []
+
+    for slug in sorted(pages):
+        cleaned, n = _strip_self_links(pages[slug], slug)
+        if n:
+            (wiki_dir / f"{slug}.md").write_text(cleaned, encoding="utf-8")
+            pages[slug] = cleaned
+            changes.append(f"{slug}.md: removed {n} self-link{'s' if n > 1 else ''}")
+
+    index_path = wiki_dir / "index.md"
+    if index_path.is_file():
+        cleaned, n = _delink_broken(index_path.read_text(encoding="utf-8"), set(pages))
+        if n:
+            index_path.write_text(cleaned, encoding="utf-8")
+            changes.append(f"index.md: de-linked {n} dead link{'s' if n > 1 else ''}")
+
+    return changes
+
+
 def _render(findings: dict[str, list[str]]) -> tuple[str, int]:
     lines, n = [], 0
     for section, items in findings.items():
@@ -242,6 +296,12 @@ def main() -> int:
         help="Also run the model pass for contradictions, duplicate concepts, "
              "out-of-scope pages and outdated claims.",
     )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply the safe, mechanical fixes (strip self-links, de-link dead "
+             "index entries) before reporting. Judgment calls are left alone.",
+    )
     args = parser.parse_args()
 
     rules_path = Path(args.vault) / "RULES.md"
@@ -250,11 +310,24 @@ def main() -> int:
         return 1
 
     pages = _pages(args.vault)
-    findings = structural_findings(args.vault, pages=pages)
+    today = datetime.date.today()
+
+    # Dated so each run stands apart in the appended launchd log.
+    print(f"# Wiki lint — {Path(args.vault).name} — {today.isoformat()}\n")
+    if args.fix:
+        changes = apply_safe_fixes(args.vault, pages)
+        print("## Auto-fixes applied\n")
+        for c in changes:
+            print(f"- {c}")
+        if not changes:
+            print("No mechanical fixes needed.")
+        print()
+        pages = _pages(args.vault)  # reload from disk to report the fixed state
+
+    findings = structural_findings(args.vault, today=today, pages=pages)
     report, count = _render(findings)
 
-    print(f"# Wiki lint — {Path(args.vault).name}")
-    print(f"\n{len(pages)} pages checked.")
+    print(f"{len(pages)} pages checked{' (after fixes)' if args.fix else ''}.")
     if count:
         print(report)
     else:
