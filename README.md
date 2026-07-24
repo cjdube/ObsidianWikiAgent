@@ -78,7 +78,7 @@ Once a vault is set up and scheduled, this is the actual workflow:
    To see it happen right away instead of waiting — e.g. just after
    dropping a file in — trigger it on demand:
    ```bash
-   launchctl start com.cjdube.wikiagent.<vault-name>-ingest
+   launchctl start com.<your-prefix>.wikiagent.<vault-name>-ingest
    ```
    or run it directly, bypassing launchd entirely:
    ```bash
@@ -118,7 +118,7 @@ Once a vault is set up and scheduled, this is the actual workflow:
    minutes.
 
    The learnings vault also audits itself weekly
-   (`launchd/com.cjdube.wikiagent.learnings-lint.plist`, Sunday 10:00,
+   (`launchd/com.<your-prefix>.wikiagent.learnings-lint.plist`, Sunday 10:00,
    after that morning's ingest); its report lands in
    `logs/learnings-lint.launchd.log`. That job sets `LLM_PROVIDER=gemini`
    because the judgment pass is where model quality decides whether the
@@ -128,22 +128,23 @@ Once a vault is set up and scheduled, this is the actual workflow:
 
 1. Create the vault folder with `RULES.md`, `raw/`, `wiki/`.
 2. Copy `launchd/template.plist.txt` to a new
-   `launchd/com.cjdube.wikiagent.<vault-name>-ingest.plist` in this repo,
-   filling in the `--vault` path, `Label`, and log filename. Commit it —
-   the other per-vault plists in `launchd/` are tracked too.
+   `launchd/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist`, filling in
+   the placeholders (repo path, `--vault` path, `Label`, log filename).
+   Concrete `.plist` files are gitignored — they stay local to your machine,
+   so there is nothing to commit.
 3. Validate it before loading — a plist with stray text (e.g. anything
    before the `<?xml ...?>` declaration) parses fine as a copy but fails
    `launchctl load` with an opaque `Input/output error`:
    ```bash
-   plutil -lint launchd/com.cjdube.wikiagent.<vault-name>-ingest.plist
+   plutil -lint launchd/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist
    ```
 4. Copy it into `~/Library/LaunchAgents/` — note the `~`. That's your
    per-user LaunchAgents directory; `/Library/LaunchAgents` (no `~`) is a
    different, root-owned system directory, and `cp` there fails with
    `Permission denied`. Then load it:
    ```bash
-   cp launchd/com.cjdube.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
-   launchctl load ~/Library/LaunchAgents/com.cjdube.wikiagent.<vault-name>-ingest.plist
+   cp launchd/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
+   launchctl load ~/Library/LaunchAgents/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist
    ```
 
 No Python changes required — this is the whole point of the vault-path
@@ -157,15 +158,15 @@ as `LocalLLMAgent`.
 
 ```bash
 # check status
-launchctl print gui/$(id -u)/com.cjdube.wikiagent.<vault-name>-ingest
+launchctl print gui/$(id -u)/com.<your-prefix>.wikiagent.<vault-name>-ingest
 
 # trigger on demand (bypasses the schedule, useful for testing)
-launchctl start com.cjdube.wikiagent.<vault-name>-ingest
+launchctl start com.<your-prefix>.wikiagent.<vault-name>-ingest
 
 # reload after editing a .plist
-launchctl unload ~/Library/LaunchAgents/com.cjdube.wikiagent.<vault-name>-ingest.plist
-cp launchd/com.cjdube.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.cjdube.wikiagent.<vault-name>-ingest.plist
+launchctl unload ~/Library/LaunchAgents/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist
+cp launchd/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist
 ```
 
 Logs land in `logs/wiki_ingest.<vault-name>.log` (structured, written by

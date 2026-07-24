@@ -3,3 +3,7 @@ __pycache__/
 config/.env
 logs/*.log
 .DS_Store
+
+# Personal launchd jobs — concrete paths/labels stay local. Copy
+# launchd/template.plist.txt to make your own; the template is tracked.
+launchd/*.plist
