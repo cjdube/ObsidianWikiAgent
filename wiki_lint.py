@@ -195,9 +195,13 @@ def check_duplicate_titles(pages: dict[str, str]) -> list[str]:
     ]
 
 
-def structural_findings(vault_path: str, today: datetime.date = None) -> dict[str, list[str]]:
+def structural_findings(
+    vault_path: str,
+    today: datetime.date = None,
+    pages: dict[str, str] = None,
+) -> dict[str, list[str]]:
     today = today or datetime.date.today()
-    pages = _pages(vault_path)
+    pages = _pages(vault_path) if pages is None else pages
     return {
         "Broken and self links": check_links(pages),
         "Orphan pages": check_orphans(pages),
@@ -235,11 +239,12 @@ def main() -> int:
         print(f"error: {rules_path} not found", file=sys.stderr)
         return 1
 
-    findings = structural_findings(args.vault)
+    pages = _pages(args.vault)
+    findings = structural_findings(args.vault, pages=pages)
     report, count = _render(findings)
 
     print(f"# Wiki lint — {Path(args.vault).name}")
-    print(f"\n{len(_pages(args.vault))} pages checked.")
+    print(f"\n{len(pages)} pages checked.")
     if count:
         print(report)
     else:

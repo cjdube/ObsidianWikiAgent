@@ -171,6 +171,18 @@ launchctl load ~/Library/LaunchAgents/com.cjdube.wikiagent.<vault-name>-ingest.p
 Logs land in `logs/wiki_ingest.<vault-name>.log` (structured, written by
 the script) and `logs/<vault-name>-ingest.launchd.log` (raw stdout/stderr).
 
+## Running the tests
+
+Deterministic unit tests cover the file I/O and path safety in
+`agent/wiki_tools.py`, every structural check in `wiki_lint.py`, and the
+agent loop's dispatch/retry plumbing in `agent/loop.py`. The LLM HTTP layer is
+mocked, so no Ollama or Gemini is needed and nothing hits the network.
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/pytest
+```
+
 ## What's NOT here
 
 - No Anthropic/Claude API usage at runtime — Claude Code was only used to

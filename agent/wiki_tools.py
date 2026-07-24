@@ -47,6 +47,18 @@ def _safe_page_path(vault_path: str, name: str) -> Path:
     return candidate
 
 
+def _safe_raw_path(vault_path: str, name: str) -> Path:
+    """Resolve a raw source name to a path inside <vault>/raw, rejecting any
+    attempt to escape that directory (e.g. via '../'). The raw-side mirror of
+    _safe_page_path — filenames here come from the model too, so they get the
+    same containment guard."""
+    raw_dir = _raw_dir(vault_path).resolve()
+    candidate = (raw_dir / name).resolve()
+    if raw_dir not in candidate.parents and candidate != raw_dir:
+        raise ValueError(f"raw file name '{name}' resolves outside the raw directory")
+    return candidate
+
+
 def list_raw_files(vault_path: str) -> dict:
     """Every raw source, by basename, wherever it sits under raw/.
 
@@ -66,10 +78,15 @@ def list_raw_files(vault_path: str) -> dict:
 
 def read_raw_file(vault_path: str, filename: str) -> dict:
     raw_dir = _raw_dir(vault_path)
-    path = raw_dir / filename
+    try:
+        path = _safe_raw_path(vault_path, filename)
+    except ValueError as e:
+        return {"error": str(e)}
     if not path.is_file():
         # Sorted into a subdirectory since it was last at the top level; find
-        # it by basename anywhere under raw/.
+        # it by basename anywhere under raw/. rglob stays under raw_dir, so the
+        # fallback can't escape even though the guard above only vetted the
+        # direct path.
         matches = [p for p in raw_dir.rglob(filename) if p.is_file()]
         if not matches:
             return {"error": f"raw file '{filename}' not found"}
@@ -100,7 +117,10 @@ def move_raw_file(vault_path: str, filename: str, folder: str) -> dict:
     if "/" in folder or "\\" in folder or folder in ("", ".", ".."):
         return {"error": f"invalid destination folder '{folder}'"}
     raw_dir = _raw_dir(vault_path).resolve()
-    src = raw_dir / filename
+    try:
+        src = _safe_raw_path(vault_path, filename)
+    except ValueError as e:
+        return {"error": str(e)}
     if not src.is_file():
         return {"error": f"raw file '{filename}' not found"}
     dest_dir = (raw_dir / folder).resolve()
