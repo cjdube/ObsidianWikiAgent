@@ -187,6 +187,4 @@ mocked, so no Ollama or Gemini is needed and nothing hits the network.
 
 - No Anthropic/Claude API usage at runtime — Claude Code was only used to
   *write* this code.
-- No lint/audit command yet — `RULES.md`'s lint workflow is a natural
-  follow-on reusing `agent/wiki_tools.py`, not built yet.
 - `config/.env` and `logs/*.log` are gitignored.
