@@ -260,7 +260,7 @@ def main() -> int:
             user_prompt="Audit the wiki and report your findings.",
             tools=QUERY_TOOL_SCHEMAS,
             dispatch=dispatch,
-            max_iterations=30,
+            max_iterations=60,
         ))
 
     return 1 if count else 0

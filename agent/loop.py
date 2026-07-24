@@ -11,6 +11,7 @@ Gemini is opt-in per run (LLM_PROVIDER=gemini) for one-off bulk work like a
 full vault rebuild, where synthesis quality matters more than cost.
 """
 
+import inspect
 import json
 import logging
 import os
@@ -55,6 +56,18 @@ def _dispatch_tool(
         result = {"error": f"unknown tool '{fn_name}'"}
     else:
         try:
+            params = inspect.signature(fn).parameters
+            takes_var_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            # Local models occasionally hallucinate an extra argument that
+            # isn't in the tool's schema (e.g. passing update_index a 'name'
+            # kwarg copied from the sibling write_wiki_page tool). Drop
+            # anything the function doesn't declare rather than failing the
+            # call outright — a genuinely missing required argument still
+            # raises normally and is reported back to the model.
+            if not takes_var_kwargs:
+                fn_args = {k: v for k, v in fn_args.items() if k in params}
             result = fn(**fn_args)
         except Exception as e:
             result = {"error": f"tool '{fn_name}' raised: {e}"}
@@ -73,9 +86,24 @@ def _post_with_retry(
     """POST, retrying transient failures with exponential backoff + jitter.
 
     Honors Retry-After when the server sends it (Gemini does on quota errors).
+    Network-level failures (timeouts, connection errors — routine for a large
+    local model under load) get the same backoff as retryable HTTP statuses,
+    rather than failing the call on the first slow response.
     """
     for attempt in range(1, _MAX_HTTP_ATTEMPTS + 1):
-        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        except requests.exceptions.RequestException as e:
+            if attempt == _MAX_HTTP_ATTEMPTS:
+                raise
+            delay = min(2 ** attempt, 60) + random.uniform(0, 1)
+            if logger:
+                logger.warning(
+                    f"{e.__class__.__name__} from model API — retrying in "
+                    f"{delay:.1f}s (attempt {attempt}/{_MAX_HTTP_ATTEMPTS})"
+                )
+            time.sleep(delay)
+            continue
         if resp.status_code not in _RETRY_STATUSES:
             resp.raise_for_status()
             return resp
@@ -138,6 +166,7 @@ def _run_ollama(
 ) -> str:
     model = model or os.getenv("OLLAMA_MODEL", "gemma4")
     host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -148,6 +177,7 @@ def _run_ollama(
         resp = _post_with_retry(
             f"{host}/api/chat",
             {"model": model, "messages": messages, "tools": tools, "stream": False},
+            timeout=timeout,
             logger=logger,
         )
         data = resp.json()
@@ -164,7 +194,15 @@ def _run_ollama(
             result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
             messages.append({"role": "tool", "content": json.dumps(result)})
 
-    raise RuntimeError(f"agent loop exceeded max_iterations={max_iterations} without a final answer")
+    if logger:
+        logger.warning(
+            f"agent loop exceeded max_iterations={max_iterations} without a "
+            "final answer — returning best-effort partial result"
+        )
+    return (
+        f"[incomplete: hit max_iterations={max_iterations} tool calls without "
+        "reaching a final answer]"
+    )
 
 
 def _gemini_key() -> str:
@@ -250,7 +288,15 @@ def _run_gemini(
             )
         contents.append({"role": "user", "parts": responses})
 
-    raise RuntimeError(f"agent loop exceeded max_iterations={max_iterations} without a final answer")
+    if logger:
+        logger.warning(
+            f"agent loop exceeded max_iterations={max_iterations} without a "
+            "final answer — returning best-effort partial result"
+        )
+    return (
+        f"[incomplete: hit max_iterations={max_iterations} tool calls without "
+        "reaching a final answer]"
+    )
 
 
 def complete_text(
@@ -293,6 +339,7 @@ def complete_text(
             ],
             "stream": False,
         },
+        timeout=int(os.getenv("OLLAMA_TIMEOUT", "300")),
     )
     return resp.json()["message"].get("content", "").strip()
 
