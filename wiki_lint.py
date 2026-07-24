@@ -95,9 +95,19 @@ def check_links(pages: dict[str, str]) -> list[str]:
     return findings
 
 
+# A slug ending in an ISO date is a dated chronological log (daily-chrome-…,
+# ai-chat-learnings-…, strategic-weekly-review-…), not a concept. Nothing has
+# reason to link *to* "July 22's browsing log," so being reachable only from
+# the index is the right bar for these — flagging them as orphans reports a
+# non-problem every ingest run creates.
+_DATED_LOG = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
 def check_orphans(pages: dict[str, str]) -> list[str]:
-    """Pages nothing links to. The index does not count: being listed in the
-    table of contents is not the same as being reachable from related work."""
+    """Concept pages nothing links to. The index does not count: being listed
+    in the table of contents is not the same as being reachable from related
+    work. Dated chronological logs are exempt (see _DATED_LOG) — they are leaf
+    notes by nature, and still count as linkers to the pages they reference."""
     inbound = {slug: set() for slug in pages}
     for slug, content in pages.items():
         for target in _linked_page_names(content):
@@ -107,7 +117,7 @@ def check_orphans(pages: dict[str, str]) -> list[str]:
         f"{slug}.md is an orphan — no other page links to it. Link it from a "
         f"related page, or reconsider whether it earns its own page."
         for slug in sorted(pages)
-        if not inbound[slug]
+        if not inbound[slug] and not _DATED_LOG.search(slug)
     ]
 
 

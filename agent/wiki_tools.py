@@ -223,6 +223,33 @@ def _linked_page_names(content: str) -> set[str]:
     return names
 
 
+def _delink_broken(content: str, valid: set[str]) -> tuple[str, int]:
+    """Replace any [[link]] whose target is not a real page with its plain
+    display text, returning the cleaned content and the count de-linked.
+
+    The local model authors index links as free text and mistypes a few each
+    run (a dropped letter, a doubled hyphen, a since-deleted page), and nothing
+    else vets them before they reach disk. A [[target]] that resolves to no
+    page is a dead link — clicking it in Obsidian only offers to create an
+    empty page — so it is flattened to text (the alias if one was given, else
+    the target) rather than left to rot in the table of contents. Typos are
+    dropped, never guess-corrected: repointing [[cla-...]] at claude-... risks
+    linking the wrong page."""
+    count = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal count
+        target = m.group(1).split("|", 1)[0].split("#", 1)[0].strip()
+        if target.endswith(".md"):
+            target = target[:-3]
+        if target in valid:
+            return m.group(0)
+        count += 1
+        return m.group(1).split("|", 1)[-1].strip()
+
+    return re.sub(r"\[\[([^\]]+)\]\]", repl, content), count
+
+
 def _strip_unfiled(content: str) -> str:
     """Drop any previously appended Unfiled section so it is recomputed rather
     than accumulating. A page the model has since filed under a real heading
@@ -277,11 +304,15 @@ def update_index(vault_path: str, content: str) -> dict:
     wiki_dir = _wiki_dir(vault_path)
     wiki_dir.mkdir(parents=True, exist_ok=True)
 
+    pages = list_wiki_pages(vault_path)["pages"]
+    valid = {page[: -len(".md")] for page in pages}
+
     body = _strip_unfiled(content).rstrip("\n")
+    body, delinked = _delink_broken(body, valid)
     linked = _linked_page_names(body)
     unfiled = [
-        page[: -len(".md")] for page in list_wiki_pages(vault_path)["pages"]
-        if page[: -len(".md")] not in linked
+        name for name in (page[: -len(".md")] for page in pages)
+        if name not in linked
     ]
     if unfiled:
         entries = "\n".join(
@@ -292,7 +323,7 @@ def update_index(vault_path: str, content: str) -> dict:
 
     path = wiki_dir / "index.md"
     path.write_text(body + "\n", encoding="utf-8")
-    return {"written": "index.md", "unfiled": len(unfiled)}
+    return {"written": "index.md", "unfiled": len(unfiled), "delinked": delinked}
 
 
 def append_log(vault_path: str, entry: str) -> dict:

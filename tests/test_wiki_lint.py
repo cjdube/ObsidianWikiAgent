@@ -51,6 +51,30 @@ def test_check_orphans_self_link_does_not_rescue():
     assert any("lonely.md is an orphan" in f for f in findings)
 
 
+def test_check_orphans_exempts_dated_capture_pages():
+    pages = {
+        "concept": "nothing links here",
+        "daily-chrome-2026-07-22": "a browsing log nothing links to",
+        "ai-chat-learnings-2026-07-16": "a chat log nothing links to",
+        "strategic-weekly-review-2026-05-11": "a weekly review nothing links to",
+    }
+    findings = wl.check_orphans(pages)
+    # The concept page is still flagged; dated chronological logs are exempt.
+    assert any("concept.md is an orphan" in f for f in findings)
+    assert not any("daily-chrome-2026-07-22" in f for f in findings)
+    assert not any("ai-chat-learnings-2026-07-16" in f for f in findings)
+    assert not any("strategic-weekly-review-2026-05-11" in f for f in findings)
+
+
+def test_check_orphans_dated_page_still_counts_as_a_linker():
+    # A dated log is exempt from being reported, but its outbound links still
+    # rescue the concept pages it points at.
+    findings = wl.check_orphans(
+        {"concept": "no inbound", "daily-chrome-2026-07-22": "see [[concept]]"}
+    )
+    assert findings == []
+
+
 # --- check_index -----------------------------------------------------------
 
 

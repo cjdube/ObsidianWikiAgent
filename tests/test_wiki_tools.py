@@ -119,6 +119,45 @@ def test_update_index_no_unfiled_when_all_linked(vault):
     assert result["unfiled"] == 0
 
 
+def test_update_index_delinks_broken_links(vault):
+    vault.page("real", "# Real\n\n**Summary**: s.\n")
+    # The model authored one valid link and one garbled/dead link.
+    result = wt.update_index(
+        vault.path,
+        "# Index\n\n## Topics\n\n- [[real]] the good one\n"
+        "- [[ai-chat--2026-07-15]] a garbled slug\n",
+    )
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "[[real]]" in index                      # valid link kept
+    assert "[[ai-chat--2026-07-15]]" not in index    # dead link removed
+    assert "a garbled slug" in index                 # description preserved
+    assert "ai-chat--2026-07-15" in index            # de-linked to plain text
+    assert result["delinked"] == 1
+
+
+def test_update_index_delink_keeps_alias_text(vault):
+    result = wt.update_index(vault.path, "## T\n\n- [[gone|Old Name]] desc\n")
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "[[gone|Old Name]]" not in index
+    assert "Old Name" in index      # the alias the reader saw is kept as text
+    assert result["delinked"] == 1
+
+
+def test_update_index_keeps_valid_links_and_unfiled_intact(vault):
+    # De-linking must not disturb valid links or the Unfiled guarantee.
+    vault.page("linked", "# Linked\n\n**Summary**: s.\n")
+    vault.page("dropped", "# Dropped\n\n**Summary**: s.\n")
+    result = wt.update_index(
+        vault.path, "## T\n\n- [[linked]]\n- [[ghost]] not a page\n"
+    )
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "[[linked]]" in index
+    assert "[[ghost]]" not in index
+    assert "[[dropped]]" in index          # still appended under Unfiled
+    assert result["unfiled"] == 1
+    assert result["delinked"] == 1
+
+
 # --- move / sort -----------------------------------------------------------
 
 
