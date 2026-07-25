@@ -123,6 +123,23 @@ Once a vault is set up and scheduled, this is the actual workflow:
    `logs/learnings-lint.launchd.log`. That job sets `LLM_PROVIDER=gemini`
    because the judgment pass is where model quality decides whether the
    findings are worth reading — the daily ingests stay on the local default.
+7. **Back the vault up to git**, if it has a remote:
+   ```bash
+   .venv/bin/python vault_snapshot.py --vault ~/Documents/llm-wiki-[vault]
+   ```
+   Stages everything, commits as `Vault snapshot <date>: <n> files`, pushes.
+   Exits without committing when nothing changed, so it is safe to schedule
+   as often as you like.
+
+   This is a separate job from the ingest, deliberately: a vault has two
+   writers — the scheduled ingest and you editing in Obsidian — and a step
+   at the end of `wiki_ingest.py` would miss every hand edit made on a day
+   with no new `raw/` sources, and would let an ingest failure cost you the
+   backup of those edits too.
+
+   It never force-pushes. A failed push is almost always a non-fast-forward
+   from a second machine, which wants a human choosing a side; the commit is
+   already safe locally, so the job just logs and stops.
 
 ## Adding a new vault
 
@@ -146,9 +163,22 @@ Once a vault is set up and scheduled, this is the actual workflow:
    cp launchd/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
    launchctl load ~/Library/LaunchAgents/com.<your-prefix>.wikiagent.<vault-name>-ingest.plist
    ```
+5. Optionally, if the vault has a git remote, repeat steps 2–4 with
+   `launchd/template-snapshot.plist.txt` for a `<vault-name>-snapshot` job
+   that commits and pushes the vault daily.
 
 No Python changes required — this is the whole point of the vault-path
 parameterization in `agent/wiki_tools.py`.
+
+### Why scheduled jobs must run through `.venv/bin/python`
+
+A vault under `~/Documents` (or `~/Desktop`) is protected by macOS TCC, and
+the grant is per-binary. The `.venv` interpreter has one; a launchd-spawned
+`/bin/bash` does not. A shell script scheduled the same way fails on every
+vault file with `Operation not permitted` — including `git`, which reports
+the vault as "not a git repository" — while the identical script run from
+your terminal works, because the terminal has its own grant. Keep the
+`ProgramArguments` interpreter as `.venv/bin/python` and this never bites.
 
 ## Scheduling — launchd
 
