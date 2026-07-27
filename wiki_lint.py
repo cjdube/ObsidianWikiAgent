@@ -193,6 +193,43 @@ def check_format(vault_path: str, pages: dict[str, str], today: datetime.date) -
     return findings
 
 
+# A lens page carries YAML frontmatter — `lens: true` plus its own check
+# config — that a consuming agent reads to discover and configure it. Only the
+# body reliably survives an ingest: write_wiki_page replaces the whole file and
+# the model rebuilds the page from what it read, dropping frontmatter it has no
+# reason to reproduce. Observed 2026-07-27: ai-slop.md lost `lens: true`,
+# max_em_dashes_per_sentence and banned_phrases in a single run, silently fell
+# out of the consumer's lens list, and took its mechanical prose checks with it
+# — no error anywhere, because nothing reads frontmatter to know it's missing.
+# The body always names the consuming tool, so that prose is the tell that the
+# marker should still be there.
+#
+# This is the one check keyed to a convention outside the vault; every other
+# check here is pure wiki structure. It earns the coupling by catching silent
+# deletion of hand-authored config that nothing else can detect.
+_LENS_PROSE = re.compile(r"evaluate_against")
+_LENS_MARKER = re.compile(r"^lens:\s*true\s*$", re.MULTILINE | re.IGNORECASE)
+_FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+
+
+def check_lens_frontmatter(pages: dict[str, str]) -> list[str]:
+    """Pages that describe themselves as an evaluation lens but no longer carry
+    the `lens: true` marker that makes them one."""
+    findings = []
+    for slug, content in sorted(pages.items()):
+        if not _LENS_PROSE.search(content):
+            continue
+        block = _FRONTMATTER.match(content)
+        if block and _LENS_MARKER.search(block.group(1)):
+            continue
+        findings.append(
+            f"{slug}.md describes itself as an evaluate_against lens but has no "
+            f"'lens: true' frontmatter — an ingest rewrite drops the whole YAML "
+            f"block; restore it from a vault snapshot or the lens is invisible."
+        )
+    return findings
+
+
 def check_duplicate_titles(pages: dict[str, str]) -> list[str]:
     """Two pages with the same title are the same page. Concepts duplicated
     under *different* titles need judgment and are left to the --deep pass."""
@@ -222,6 +259,7 @@ def structural_findings(
         "Index integrity": check_index(vault_path, pages),
         "Page format": check_format(vault_path, pages, today),
         "Duplicate titles": check_duplicate_titles(pages),
+        "Lens integrity": check_lens_frontmatter(pages),
     }
 
 

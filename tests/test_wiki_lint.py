@@ -250,3 +250,33 @@ def test_main_fix_applies_then_reports_remaining(vault, monkeypatch, capsys):
     # ...while the judgment item still surfaces and drives a nonzero exit.
     assert "orphan.md is an orphan" in out
     assert rc == 1
+
+
+# --- lens frontmatter ------------------------------------------------------
+
+_LENS_BODY = (
+    "# AI Slop\n\n**Summary**: The lens applied when a draft is judged "
+    "(consumed by LocalLLMAgent's `evaluate_against`).\n"
+)
+
+
+def test_check_lens_frontmatter_flags_stripped_marker():
+    findings = wl.check_lens_frontmatter({"ai-slop": _LENS_BODY})
+    assert len(findings) == 1
+    assert "no 'lens: true' frontmatter" in findings[0]
+
+
+def test_check_lens_frontmatter_accepts_intact_marker():
+    page = "---\nlens: true\ndescription: standards\n---\n\n" + _LENS_BODY
+    assert wl.check_lens_frontmatter({"ai-slop": page}) == []
+
+
+def test_check_lens_frontmatter_flags_frontmatter_without_the_marker():
+    """Frontmatter surviving isn't enough — the marker itself must be there."""
+    page = "---\ndescription: standards\n---\n\n" + _LENS_BODY
+    assert len(wl.check_lens_frontmatter({"ai-slop": page})) == 1
+
+
+def test_check_lens_frontmatter_ignores_ordinary_pages():
+    page = "# Colima\n\n**Summary**: A container runtime.\n"
+    assert wl.check_lens_frontmatter({"colima": page}) == []
