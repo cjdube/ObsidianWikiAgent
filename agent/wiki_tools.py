@@ -190,12 +190,39 @@ def read_wiki_page(vault_path: str, name: str) -> dict:
     return {"content": path.read_text(encoding="utf-8")}
 
 
+_FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---", re.DOTALL)
+
+
 def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
+    """Write a page, carrying over any YAML frontmatter the caller left out.
+
+    A page's frontmatter is machine-readable config a human wrote — the marker
+    that makes a page an evaluation lens, and the lens's own check settings.
+    The model never reproduces it: it reads the page, rebuilds it from the
+    template in RULES.md (which starts at '# Title' and never mentions
+    frontmatter), and writes back a full body with the block missing. Because
+    this tool replaces whole files, that silently deletes the config, and
+    nothing downstream reads frontmatter to notice it went — the page still
+    looks right in Obsidian. Observed 2026-07-27: ai-slop.md lost `lens: true`
+    plus its em-dash and banned-phrase settings in a single ingest, dropping
+    out of the consuming agent's lens list and taking its deterministic prose
+    checks with it.
+
+    Preserving it here rather than asking for it in the prompt follows
+    update_index: the local model does not reliably honour instructions about
+    parts of a file it cannot see the purpose of, and a guarantee belongs in
+    code. Content that *does* carry frontmatter is written through untouched,
+    so this restores what was dropped without making frontmatter immutable.
+    """
     try:
         path = _safe_page_path(vault_path, name)
     except ValueError as e:
         return {"error": str(e)}
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file() and not content.startswith("---"):
+        block = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
+        if block:
+            content = f"{block.group(0)}\n\n{content.lstrip()}"
     path.write_text(content, encoding="utf-8")
     return {"written": path.name}
 

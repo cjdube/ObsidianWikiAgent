@@ -241,3 +241,68 @@ def test_mark_ingested_dedups(vault):
     wt.mark_ingested(vault.path, "b.txt")
     stored = json.loads((vault.root / "wiki" / ".ingested.json").read_text())
     assert stored == ["a.txt", "b.txt"]
+
+
+# --- write_wiki_page -------------------------------------------------------
+
+FRONTMATTER = (
+    "---\nlens: true\ndescription: writing standards\n"
+    "max_em_dashes_per_sentence: 1\n---"
+)
+LENS_PAGE = f"{FRONTMATTER}\n\n# AI Slop\n\nOriginal body.\n"
+
+
+def test_write_wiki_page_creates_a_new_page(vault):
+    assert wt.write_wiki_page(vault.path, "colima", "# Colima\n") == {"written": "colima.md"}
+    assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n"
+
+
+def test_write_wiki_page_overwrites_a_plain_page(vault):
+    vault.page("colima", "# Colima\n\nOld.\n")
+    wt.write_wiki_page(vault.path, "colima", "# Colima\n\nNew.\n")
+    assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n\nNew.\n"
+
+
+def test_write_wiki_page_preserves_frontmatter_the_model_dropped(vault):
+    """The regression that cost ai-slop.md its lens marker: the model rewrites
+    the body from RULES.md's template and omits the YAML block entirely."""
+    vault.page("ai-slop", LENS_PAGE)
+    wt.write_wiki_page(vault.path, "ai-slop", "# AI Slop\n\nRewritten body.\n")
+
+    result = (vault.root / "wiki" / "ai-slop.md").read_text()
+    assert result.startswith(FRONTMATTER)
+    assert "lens: true" in result
+    assert "max_em_dashes_per_sentence: 1" in result
+    assert "Rewritten body." in result
+    assert "Original body." not in result
+
+
+def test_write_wiki_page_respects_frontmatter_the_caller_supplies(vault):
+    """A caller that sends its own block is making a deliberate change — the
+    old one must not be prepended on top of it."""
+    vault.page("ai-slop", LENS_PAGE)
+    new = "---\nlens: true\ndescription: revised\n---\n\n# AI Slop\n\nBody.\n"
+    wt.write_wiki_page(vault.path, "ai-slop", new)
+
+    assert (vault.root / "wiki" / "ai-slop.md").read_text() == new
+
+
+def test_write_wiki_page_leaves_pages_without_frontmatter_alone(vault):
+    """The no-op path for the ~99% of pages that never had a block."""
+    vault.page("colima", "# Colima\n\nOld.\n")
+    wt.write_wiki_page(vault.path, "colima", "# Colima\n\nNew.\n")
+    assert not (vault.root / "wiki" / "colima.md").read_text().startswith("---")
+
+
+def test_write_wiki_page_does_not_mistake_a_body_separator_for_frontmatter(vault):
+    """This vault's page format puts '---' between the header block and the
+    body. Only a block at position 0 counts."""
+    vault.page("colima", "# Colima\n\n**Summary**: s\n\n---\n\nBody.\n")
+    wt.write_wiki_page(vault.path, "colima", "# Colima\n\nNew.\n")
+    assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n\nNew.\n"
+
+
+def test_write_wiki_page_rejects_traversal(vault):
+    result = wt.write_wiki_page(vault.path, "../../escape", "x")
+    assert "error" in result
+    assert not (vault.root.parent / "escape.md").exists()
