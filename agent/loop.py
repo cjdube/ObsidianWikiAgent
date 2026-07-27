@@ -154,6 +154,22 @@ def run_agent(
     raise ValueError(f"unknown provider '{name}' (expected 'ollama' or 'gemini')")
 
 
+def _ollama_options() -> dict:
+    """The `options` block sent with every Ollama call.
+
+    `num_ctx` is pinned rather than left to the server default because the
+    consequence of getting it wrong is silent. A run's context is the vault's
+    RULES.md, plus the whole of wiki/index.md, plus every tool result the loop
+    accumulates — measured at ~22K tokens on a 228-page vault and growing with
+    it. Overflow doesn't error: Ollama drops the oldest messages, so the model
+    answers from a truncated view and the output just quietly gets worse.
+    32768 matches the default of the Ollama this was built against (0.32.3);
+    naming it here means an upstream change to that default cannot start
+    truncating runs without anyone noticing.
+    """
+    return {"num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "32768"))}
+
+
 def _run_ollama(
     system_prompt: str,
     user_prompt: str,
@@ -176,7 +192,13 @@ def _run_ollama(
     for iteration in range(max_iterations):
         resp = _post_with_retry(
             f"{host}/api/chat",
-            {"model": model, "messages": messages, "tools": tools, "stream": False},
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "stream": False,
+                "options": _ollama_options(),
+            },
             timeout=timeout,
             logger=logger,
         )
@@ -338,6 +360,7 @@ def complete_text(
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
+            "options": _ollama_options(),
         },
         timeout=int(os.getenv("OLLAMA_TIMEOUT", "300")),
     )

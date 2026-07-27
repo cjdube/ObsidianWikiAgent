@@ -179,3 +179,23 @@ def test_run_agent_rejects_unknown_provider():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_ollama_calls_send_num_ctx(monkeypatch):
+    """num_ctx must reach Ollama on every call — context overflow is silent,
+    so a dropped option degrades output with nothing to catch it."""
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "12345")
+    seen = []
+
+    def fake_post(url, payload, **kwargs):
+        seen.append(payload)
+        return FakeResp(200, json_data={"message": {"content": "done"}})
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama")
+    loop.complete_text("sys", "user", provider="ollama")
+
+    assert len(seen) == 2
+    for payload in seen:
+        assert payload["options"]["num_ctx"] == 12345
