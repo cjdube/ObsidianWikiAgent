@@ -62,8 +62,8 @@ tool schemas passed to `run_agent`.
    ```
 5. Test manually before scheduling:
    ```bash
-   .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-[vault]
-   .venv/bin/python wiki_query.py --vault ~/Documents/llm-wiki-[vault] "some question"
+   .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-learnings
+   .venv/bin/python wiki_query.py --vault ~/Documents/llm-wiki-learnings "some question"
    ```
 6. Load the launchd plist (see below).
 
@@ -82,7 +82,7 @@ Once a vault is set up and scheduled, this is the actual workflow:
    ```
    or run it directly, bypassing launchd entirely:
    ```bash
-   .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-[vault]
+   .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-learnings
    ```
 3. **Check what it did.** `<vault>/wiki/log.md` is the agent's own
    append-only account of what it read, what it changed, and any judgment
@@ -99,13 +99,13 @@ Once a vault is set up and scheduled, this is the actual workflow:
 5. **Ask it a question directly**, any time, without waiting for a
    scheduled run:
    ```bash
-   .venv/bin/python wiki_query.py --vault ~/Documents/llm-wiki-[vault] "What did we decide about the fall speaker schedule?"
+   .venv/bin/python wiki_query.py --vault ~/Documents/llm-wiki-learnings "What have we learned about scoping agent tool schemas?"
    ```
    This is read-only — it answers by citing the specific wiki pages it
    drew from and never edits anything.
 6. **Audit the wiki** for problems that creep in over time:
    ```bash
-   .venv/bin/python wiki_lint.py --vault ~/Documents/llm-wiki-[vault]
+   .venv/bin/python wiki_lint.py --vault ~/Documents/llm-wiki-learnings
    ```
    Report-only — it never edits the vault. Structural checks (broken and
    self links, orphan pages, index gaps, page format, duplicate titles) run
@@ -125,7 +125,7 @@ Once a vault is set up and scheduled, this is the actual workflow:
    findings are worth reading — the daily ingests stay on the local default.
 7. **Back the vault up to git**, if it has a remote:
    ```bash
-   .venv/bin/python vault_snapshot.py --vault ~/Documents/llm-wiki-[vault]
+   .venv/bin/python vault_snapshot.py --vault ~/Documents/llm-wiki-learnings
    ```
    Stages everything, commits as `Vault snapshot <date>: <n> files`, pushes.
    Exits without committing when nothing changed, so it is safe to schedule
