@@ -276,6 +276,61 @@ def check_duplicate_titles(pages: dict[str, str]) -> list[str]:
     ]
 
 
+# Two pages whose text is identical once each one's own name is blanked out were
+# written from a single template with the subject swapped. Observed 2026-08-02:
+# fable.md and sol.md, two genuinely different products that one source named in
+# a single clause and distinguished in no way, so the model asserted the same
+# four facts about both. Nothing structural caught it — the titles differ so
+# check_duplicate_titles was blind, and each links to the other so neither was an
+# orphan — and it took a model pass over the whole vault to notice something a
+# string comparison settles for free.
+#
+# Names are blanked instead of comparing pages pairwise so this stays one pass
+# over the vault. Blanking every link target is what absorbs the asymmetry these
+# pairs always have: each twin links to the other, and to nothing else different.
+_LINK = re.compile(r"\[\[[^\]]+\]\]")
+_UPDATED_LINE = re.compile(r"^\*\*Last updated\*\*:.*$", re.MULTILINE)
+
+# Below this, a skeleton is too short to mean anything — two pages that are
+# little more than a heading would otherwise match each other on structure alone.
+_MIN_SKELETON = 80
+
+
+def _skeleton(slug: str, content: str) -> str:
+    """The page with everything naming *this particular page* removed: its slug
+    and title wherever they appear, every link target, and the Last updated date
+    (metadata, and the one field twins routinely differ on). What survives is the
+    template the page was filled in from."""
+    body = _UPDATED_LINE.sub("", content)
+    body = _LINK.sub("[[·]]", body)
+    title = next((l[2:].strip() for l in content.splitlines() if l.startswith("# ")), "")
+    names = {n for n in (slug, slug.replace("-", " "), title) if n}
+    # Longest first, so "model fusion" is blanked before a bare "model" can
+    # carve it up into something that no longer matches its twin.
+    for name in sorted(names, key=len, reverse=True):
+        body = re.sub(rf"\b{re.escape(name)}\b", "·", body, flags=re.IGNORECASE)
+    return " ".join(body.split())
+
+
+def check_template_twins(pages: dict[str, str]) -> list[str]:
+    """Pages that are one template filled in twice. Unlike check_duplicate_titles
+    this catches twins with different names, and unlike the --deep pass it costs
+    nothing and cannot hallucinate: the pages really are character-identical
+    apart from what names them."""
+    by_skeleton: dict[str, list[str]] = {}
+    for slug, content in sorted(pages.items()):
+        skeleton = _skeleton(slug, content)
+        if len(skeleton) >= _MIN_SKELETON:
+            by_skeleton.setdefault(skeleton, []).append(slug)
+    return [
+        f"{' and '.join(f'{s}.md' for s in slugs)} are one template filled in "
+        f"twice — identical once each page's own name is removed. Merge them, or "
+        f"give each page content specific to its own subject."
+        for slugs in sorted(by_skeleton.values())
+        if len(slugs) > 1
+    ]
+
+
 def structural_findings(
     vault_path: str,
     today: datetime.date = None,
@@ -289,6 +344,7 @@ def structural_findings(
         "Index integrity": check_index(vault_path, pages),
         "Page format": check_format(vault_path, pages, today),
         "Duplicate titles": check_duplicate_titles(pages),
+        "Template twins": check_template_twins(pages),
         "Lens integrity": check_lens_frontmatter(pages),
     }
 

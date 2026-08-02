@@ -187,6 +187,47 @@ def test_check_duplicate_titles():
     assert "a.md and b.md" in findings[0]
 
 
+# --- check_template_twins --------------------------------------------------
+
+
+def twin(name, other, updated="2026-07-15"):
+    """A page in the shape that fable.md and sol.md actually had: one template
+    with the subject swapped, each twin linking to the other."""
+    return (
+        f"# {name.title()}\n\n"
+        f"**Summary**: A third-party API wrapper and router.\n"
+        f"**Sources**: note.txt\n"
+        f"**Last updated**: {updated}\n\n---\n\n"
+        f"{name.title()} acts as an intermediary between agents and providers.\n\n"
+        f"## Related pages\n\n- [[claude-code]]\n- [[{other}]]\n"
+    )
+
+
+def test_check_template_twins_flags_name_swapped_pages():
+    findings = wl.check_template_twins({"fable": twin("fable", "sol"),
+                                        "sol": twin("sol", "fable")})
+    assert len(findings) == 1
+    assert "fable.md and sol.md" in findings[0]
+
+
+def test_check_template_twins_ignores_differing_last_updated():
+    # A twin edited a day later is still a twin; the date is metadata.
+    findings = wl.check_template_twins({"fable": twin("fable", "sol"),
+                                        "sol": twin("sol", "fable", updated="2026-08-02")})
+    assert len(findings) == 1
+
+
+def test_check_template_twins_leaves_genuinely_different_pages():
+    pages = {"fable": twin("fable", "sol"),
+             "ollama": good_page(title="Ollama", summary="Local model runner.")}
+    assert wl.check_template_twins(pages) == []
+
+
+def test_check_template_twins_ignores_pages_too_short_to_judge():
+    # Two near-empty pages match on structure alone and prove nothing.
+    assert wl.check_template_twins({"a": "# A\n", "b": "# B\n"}) == []
+
+
 # --- structural_findings + exit code ---------------------------------------
 
 
