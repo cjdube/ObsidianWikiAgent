@@ -142,6 +142,36 @@ def check_index(vault_path: str, pages: dict[str, str]) -> list[str]:
     return findings
 
 
+def _cited_sources(sources: str, raw: set[str]) -> list[str]:
+    """Split a Sources line into the filenames it cites.
+
+    Entries are comma-separated, but a filename may itself contain a comma —
+    clippings are named after the article title, and titles have commas in
+    them. Splitting blind turns one real citation into two fragments that
+    match nothing, and the page gets reported for inventing sources it cited
+    correctly. Observed 2026-08-02: six pages citing one clipping produced
+    twelve findings, every one of them false.
+
+    There is no delimiter that tells a separating comma from a filename's own,
+    so the raw/ listing arbitrates: consecutive fragments are rejoined when
+    they spell a file that actually exists, longest run first. A citation that
+    matches nothing is left split on its commas — it is already being reported
+    as unresolvable, and guessing at its boundaries would not change that."""
+    parts = sources.split(",")
+    cited, i = [], 0
+    while i < len(parts):
+        for j in range(len(parts), i, -1):
+            candidate = ",".join(parts[i:j]).strip().strip("[]`")
+            if candidate in raw:
+                cited.append(candidate)
+                i = j
+                break
+        else:
+            cited.append(parts[i].strip().strip("[]`"))
+            i += 1
+    return cited
+
+
 def check_format(vault_path: str, pages: dict[str, str], today: datetime.date) -> list[str]:
     """The page format RULES.md requires — the defect classes a weaker model
     reliably produces: slug-as-title, placeholder and future dates, and
@@ -177,7 +207,7 @@ def check_format(vault_path: str, pages: dict[str, str], today: datetime.date) -
 
         sources = _field(content, "Sources")
         if sources:
-            for src in (s.strip().strip("[]`") for s in sources.split(",")):
+            for src in _cited_sources(sources, raw):
                 if not src:
                     continue
                 if "/" in src:

@@ -147,6 +147,36 @@ def test_check_format_citation_missing_source(vault):
     assert any("not a file in raw/" in f for f in findings)
 
 
+# A clipping is named after its article's title, so a comma inside the filename
+# is routine. The separating commas and this one are the same character.
+COMMA_NAME = "if-you're-still-hitting-the-wall,-you're-doing-it-wrong.md"
+
+
+def test_check_format_citation_filename_containing_comma(vault):
+    vault.raw(COMMA_NAME, subdir="clippings")
+    findings = wl.check_format(vault.path, {"a": good_page(sources=COMMA_NAME)}, TODAY)
+    assert findings == []
+
+
+def test_check_format_citation_comma_filename_among_others(vault):
+    vault.raw("note.txt")
+    vault.raw(COMMA_NAME, subdir="clippings")
+    vault.raw("other.md")
+    sources = f"note.txt, {COMMA_NAME}, other.md"
+    assert wl.check_format(vault.path, {"a": good_page(sources=sources)}, TODAY) == []
+
+
+def test_cited_sources_splits_unresolvable_citation_on_its_commas():
+    # Nothing in raw/ to rejoin against, so the fragments stay split and are
+    # each reported — an invented citation is still caught.
+    assert wl._cited_sources("ghost,-part-two.md", set()) == ["ghost", "-part-two.md"]
+
+
+def test_cited_sources_prefers_the_longest_run_that_resolves():
+    raw = {"a.md", "b.md", "a.md, b.md"}
+    assert wl._cited_sources("a.md, b.md", raw) == ["a.md, b.md"]
+
+
 # --- check_duplicate_titles ------------------------------------------------
 
 
