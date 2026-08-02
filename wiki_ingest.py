@@ -23,6 +23,7 @@ from agent.wiki_tools import (
     INGEST_TOOL_SCHEMAS,
     append_log,
     get_ingested_sources,
+    list_binary_raw_files,
     list_raw_files,
     list_unsorted_raw_files,
     list_wiki_pages,
@@ -186,6 +187,17 @@ def ingest_vault(vault_path: str, logger) -> int:
     # Organize freshly dropped files into their subdirectories first, so the
     # ingest loop below only ever encounters sorted sources.
     sort_raw_files(vault_path, logger)
+
+    # Binaries never reach the model (see _is_text_source), but a file put in
+    # raw/ was put there to be read, so say so rather than ignoring it in
+    # silence — the fix is OCR or a vision model, and only a human can decide
+    # that's worth doing.
+    binaries = list_binary_raw_files(vault_path).get("files", [])
+    if binaries:
+        logger.warning(
+            f"Skipping {len(binaries)} binary source(s) in raw/ — these need OCR "
+            f"or a vision model, not a text read: {', '.join(binaries)}"
+        )
 
     raw_files = list_raw_files(vault_path).get("files", [])
     already_ingested = set(get_ingested_sources(vault_path))

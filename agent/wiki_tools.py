@@ -59,19 +59,66 @@ def _safe_raw_path(vault_path: str, name: str) -> Path:
     return candidate
 
 
+def _is_text_source(path: Path) -> bool:
+    """Whether a raw file is something the ingest can actually read.
+
+    A binary dropped into raw/ is not merely useless, it is dangerous.
+    read_raw_file decodes with errors="replace", so a PNG never fails — it
+    returns hundreds of thousands of replacement characters. The model is then
+    holding a filename and no legible content, and it writes what the filename
+    implies, citing the file for every claim.
+
+    Observed 2026-08-02: WhatPMsGetPaidFor2026.png returned 366k characters of
+    noise, of which 156k were replacement chars, and produced roughly
+    twenty-five specific assertions about product-management compensation
+    across three pages — PRDs, JIRA, standups, moats, activation and retention
+    — each tagged (source: WhatPMsGetPaidFor2026.png). None of it appears in
+    the file. check_format cannot catch this: it verifies the cited file
+    exists, and it did. Fabrication that carries a citation is worse than
+    fabrication that does not, because it reads as sourced.
+
+    Git's heuristic, for the same reason git needs one: a NUL byte in the first
+    8 KB means binary. Cheap, and it does not care about the extension, so a
+    mislabelled file is still caught."""
+    try:
+        with path.open("rb") as f:
+            return b"\x00" not in f.read(8192)
+    except OSError:
+        return False
+
+
 def list_raw_files(vault_path: str) -> dict:
-    """Every raw source, by basename, wherever it sits under raw/.
+    """Every raw source the ingest can read, by basename, wherever it sits
+    under raw/.
 
     Recurses into the sort subdirectories (daily-*, misc, ...) so files moved
     there by the pre-ingest sort step are still seen. Returns bare basenames —
     not relative paths — so the identity a file is tracked by in
-    .ingested.json is unchanged by sorting and nothing gets re-ingested."""
+    .ingested.json is unchanged by sorting and nothing gets re-ingested.
+
+    Binaries are excluded (see _is_text_source). They are reported separately
+    by list_binary_raw_files rather than dropped in silence, because a file
+    dropped into raw/ was put there to be read."""
     raw_dir = _raw_dir(vault_path)
     if not raw_dir.exists():
         return {"files": []}
     names = {
         p.name for p in raw_dir.rglob("*")
-        if p.is_file() and not p.name.startswith(".")
+        if p.is_file() and not p.name.startswith(".") and _is_text_source(p)
+    }
+    return {"files": sorted(names)}
+
+
+def list_binary_raw_files(vault_path: str) -> dict:
+    """The raw files list_raw_files refuses to hand the model. Surfaced so a
+    run can say which sources it ignored — a screenshot or PDF put in raw/ was
+    meant to be a source, and needs OCR or a vision model, not silence."""
+    raw_dir = _raw_dir(vault_path)
+    if not raw_dir.exists():
+        return {"files": []}
+    names = {
+        p.name for p in raw_dir.rglob("*")
+        if p.is_file() and not p.name.startswith(".") and not _is_text_source(p)
     }
     return {"files": sorted(names)}
 
@@ -99,13 +146,18 @@ def read_raw_file(vault_path: str, filename: str) -> dict:
 
 def list_unsorted_raw_files(vault_path: str) -> dict:
     """Files sitting directly in raw/, i.e. dropped in but not yet sorted into
-    one of the vault's subdirectories. These are the sort step's input."""
+    one of the vault's subdirectories. These are the sort step's input.
+
+    Binaries are excluded here too. The sorter classifies a file by reading the
+    start of it, so handing it a PNG asks the model to pick a folder from
+    binary noise — the same guess-from-the-filename that fabricated content
+    downstream, just earlier in the run."""
     raw_dir = _raw_dir(vault_path)
     if not raw_dir.exists():
         return {"files": []}
     files = sorted(
         p.name for p in raw_dir.iterdir()
-        if p.is_file() and not p.name.startswith(".")
+        if p.is_file() and not p.name.startswith(".") and _is_text_source(p)
     )
     return {"files": files}
 

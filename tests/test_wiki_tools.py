@@ -223,6 +223,44 @@ def test_list_unsorted_raw_files_top_level_only(vault):
     assert wt.list_unsorted_raw_files(vault.path)["files"] == ["top.txt"]
 
 
+def _png(vault, name="shot.png", subdir=""):
+    """A file with a NUL byte in its header, like any real binary."""
+    d = vault.root / "raw" / subdir if subdir else vault.root / "raw"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\xff" * 400)
+    return p
+
+
+def test_list_raw_files_excludes_binaries(vault):
+    # A binary decodes to replacement characters rather than failing, so the
+    # model receives noise plus a filename and writes what the name implies.
+    vault.raw("real.txt")
+    _png(vault)
+    assert wt.list_raw_files(vault.path)["files"] == ["real.txt"]
+
+
+def test_list_binary_raw_files_reports_what_was_skipped(vault):
+    vault.raw("real.txt")
+    _png(vault, "a.png")
+    _png(vault, "b.pdf", subdir="misc")
+    assert wt.list_binary_raw_files(vault.path)["files"] == ["a.png", "b.pdf"]
+
+
+def test_list_unsorted_raw_files_excludes_binaries(vault):
+    # The sorter classifies by reading the file; a PNG makes it guess.
+    vault.raw("top.txt")
+    _png(vault)
+    assert wt.list_unsorted_raw_files(vault.path)["files"] == ["top.txt"]
+
+
+def test_binary_detection_ignores_extension(vault):
+    # Extension allowlists miss mislabelled files; the NUL byte does not.
+    (vault.root / "raw" / "sneaky.md").write_bytes(b"# Title\x00\x00binary")
+    assert wt.list_raw_files(vault.path)["files"] == []
+    assert wt.list_binary_raw_files(vault.path)["files"] == ["sneaky.md"]
+
+
 # --- ingested ledger -------------------------------------------------------
 
 
