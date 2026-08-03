@@ -202,11 +202,51 @@ launchctl load ~/Library/LaunchAgents/com.<your-prefix>.wikiagent.<vault-name>-i
 Logs land in `logs/wiki_ingest.<vault-name>.log` (structured, written by
 the script) and `logs/<vault-name>-ingest.launchd.log` (raw stdout/stderr).
 
+Both are capped. The structured log rotates at 5 MB, keeping three backups.
+The launchd log can't rotate — launchd opens it when the job starts and the
+job's stdout *is* that descriptor, so renaming it would send the rest of the
+run's output to a file nobody reads — so the script instead rewrites its tail
+in place at startup, keeping the last 1 MB once it passes 5 MB. That needs the
+script to know which file launchd chose, which is why the `.plist` repeats the
+path in `EnvironmentVariables` as `WIKI_LAUNCHD_LOG`; if you leave it out,
+nothing breaks and nothing gets trimmed.
+
+## When a run goes wrong
+
+A scheduled ingest is bounded twice over, because an unbounded one does real
+damage beyond being late: Ollama runs with `OLLAMA_NUM_PARALLEL=1`, so a run
+that keeps retrying holds the only slot every other consumer of that Ollama is
+queued behind. On 2026-08-03 a wedged MLX runner had the 09:00 ingest retrying
+until 11:54 — nearly three hours during which nothing else could get a model
+call through.
+
+- **A wall-clock budget for the whole run**, 45 minutes by default
+  (`WIKI_RUN_BUDGET_MINUTES` in `config/.env`, or `--budget-minutes` for a
+  one-off). The deadline is enforced from inside the HTTP retry loop, not just
+  between sources, since that is where the hours actually go: the script won't
+  start a backoff it can't finish, and shortens a request timeout that would
+  overshoot.
+- **A retry ceiling per source** (8), counted across all of that source's
+  attempts and loop iterations. The per-call cap alone was never enough —
+  30 iterations x 5 HTTP attempts x 3 ingest attempts is up to 450 retries for
+  one file.
+
+Either limit stops the whole run, logs an error, and exits non-zero. Work
+already done is kept: finished sources stay marked, unfinished ones stay
+unmarked and are picked up by the next scheduled run.
+
+A stopped or failed run also pushes a phone alert via ntfy, so it doesn't wait
+on someone opening a log. Set `NTFY_URL` (and usually `NTFY_TOKEN`) in
+`config/.env` — the same self-hosted server `LocalLLMAgent` alerts through.
+Leaving `NTFY_URL` unset switches push off; runs still log and still exit
+non-zero. Delivery is best-effort and never masks the failure it reports.
+
 ## Running the tests
 
 Deterministic unit tests cover the file I/O and path safety in
 `agent/wiki_tools.py`, every structural check in `wiki_lint.py`, and the
-agent loop's dispatch/retry plumbing in `agent/loop.py`. The LLM HTTP layer is
+agent loop's dispatch/retry plumbing in `agent/loop.py`, and the run budget
+and failure alerting in `agent/budget.py` and `wiki_ingest.py`. The LLM HTTP layer is
 mocked, so no Ollama or Gemini is needed and nothing hits the network.
 
 ```bash

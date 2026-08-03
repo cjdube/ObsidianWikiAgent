@@ -1,0 +1,135 @@
+"""Tests for the run budget in agent/budget.py and its use in agent/loop.py.
+
+The failure these guard against is the 2026-08-03 run: a wedged Ollama, a
+retry loop that stayed inside every per-call cap, and 2h54m of wall clock. So
+the assertions are about *stopping* — that a spent budget raises instead of
+sleeping, and that nothing on the way out swallows it.
+"""
+
+import requests
+
+from agent import budget, loop
+from tests.test_loop import FakeResp, _sequenced
+
+
+# --- deadline --------------------------------------------------------------
+
+
+def test_no_budget_is_a_noop():
+    budget.check("anything")
+    budget.before_retry(999, "reason")
+    assert budget.remaining() is None
+    assert budget.clamp_timeout(600) == 600
+
+
+def test_check_raises_once_deadline_passes():
+    budget.start_run(-1)
+    try:
+        budget.check("the next source")
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded as e:
+        assert "the next source" in str(e)
+
+
+def test_check_passes_while_time_remains():
+    budget.start_run(60)
+    budget.check("the next source")
+
+
+def test_clamp_timeout_shortens_to_remaining():
+    budget.start_run(5)
+    assert budget.clamp_timeout(600) == 5
+    assert budget.clamp_timeout(2) == 2
+
+
+def test_before_retry_refuses_a_backoff_that_outlasts_the_budget():
+    budget.start_run(3)
+    try:
+        budget.before_retry(17.0, "ReadTimeout from model API")
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded as e:
+        assert "backoff" in str(e)
+
+
+# --- per-source retry ceiling ----------------------------------------------
+
+
+def test_retry_ceiling_is_spent_across_calls_not_per_call():
+    budget.start_source("a-source.md", max_retries=2)
+    budget.before_retry(0.1, "first")
+    budget.before_retry(0.1, "second")
+    try:
+        budget.before_retry(0.1, "third")
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded as e:
+        assert "a-source.md" in str(e)
+
+
+def test_retry_ceiling_resets_per_source():
+    budget.start_source("first.md", max_retries=1)
+    budget.before_retry(0.1, "reason")
+    budget.start_source("second.md", max_retries=1)
+    budget.before_retry(0.1, "reason")  # fresh ceiling, must not raise
+
+
+# --- integration with _post_with_retry -------------------------------------
+
+
+def test_post_with_retry_stops_when_the_ceiling_is_spent(monkeypatch):
+    """The wedged-Ollama case: every attempt times out, and the ceiling — not
+    _MAX_HTTP_ATTEMPTS — is what ends it."""
+    monkeypatch.setattr(loop.time, "sleep", lambda s: None)
+    attempts = []
+
+    def fake_post(*a, **k):
+        attempts.append(1)
+        raise requests.exceptions.ReadTimeout("wedged")
+
+    monkeypatch.setattr(loop.requests, "post", fake_post)
+    budget.start_source("a-source.md", max_retries=2)
+
+    try:
+        loop._post_with_retry("http://x", {})
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded:
+        pass
+    assert len(attempts) == 3  # two retries consumed, third refused
+
+
+def test_post_with_retry_stops_when_the_deadline_passes(monkeypatch):
+    monkeypatch.setattr(loop.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        loop.requests, "post",
+        _sequenced([requests.exceptions.ReadTimeout("wedged")] * loop._MAX_HTTP_ATTEMPTS),
+    )
+    budget.start_run(-1)
+
+    try:
+        loop._post_with_retry("http://x", {})
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded:
+        pass
+
+
+def test_post_with_retry_clamps_the_request_timeout(monkeypatch):
+    seen = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        seen["timeout"] = timeout
+        return FakeResp(200, json_data={"ok": 1})
+
+    monkeypatch.setattr(loop.requests, "post", fake_post)
+    budget.start_run(10)
+    loop._post_with_retry("http://x", {}, timeout=600)
+    assert seen["timeout"] <= 10
+
+
+def test_healthy_run_is_untouched_by_a_generous_budget(monkeypatch):
+    monkeypatch.setattr(loop.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        loop.requests, "post",
+        _sequenced([FakeResp(503), FakeResp(200, json_data={"ok": 1})]),
+    )
+    budget.start_run(600)
+    budget.start_source("a-source.md", max_retries=8)
+    assert loop._post_with_retry("http://x", {}).json() == {"ok": 1}

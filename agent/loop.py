@@ -23,6 +23,8 @@ from typing import Callable, Optional
 import requests
 from dotenv import load_dotenv
 
+from agent import budget
+
 _ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_ROOT / "config" / ".env")
 
@@ -89,17 +91,29 @@ def _post_with_retry(
     Network-level failures (timeouts, connection errors — routine for a large
     local model under load) get the same backoff as retryable HTTP statuses,
     rather than failing the call on the first slow response.
+
+    Every wait here is also charged against the run budget (agent/budget.py).
+    _MAX_HTTP_ATTEMPTS caps one call's retries, which is not the same as
+    capping the run's: this helper is invoked once per loop iteration, per
+    ingest attempt, per source, so a wedged server stays under this cap while
+    the totals run to hours. budget.before_retry is what actually stops that.
     """
     for attempt in range(1, _MAX_HTTP_ATTEMPTS + 1):
+        budget.check("model request")
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            resp = requests.post(
+                url, json=payload, headers=headers,
+                timeout=budget.clamp_timeout(timeout),
+            )
         except requests.exceptions.RequestException as e:
             if attempt == _MAX_HTTP_ATTEMPTS:
                 raise
             delay = min(2 ** attempt, 60) + random.uniform(0, 1)
+            reason = f"{e.__class__.__name__} from model API"
+            budget.before_retry(delay, reason)
             if logger:
                 logger.warning(
-                    f"{e.__class__.__name__} from model API — retrying in "
+                    f"{reason} — retrying in "
                     f"{delay:.1f}s (attempt {attempt}/{_MAX_HTTP_ATTEMPTS})"
                 )
             time.sleep(delay)
@@ -112,9 +126,11 @@ def _post_with_retry(
         retry_after = resp.headers.get("Retry-After")
         delay = float(retry_after) if retry_after else min(2 ** attempt, 60)
         delay += random.uniform(0, 1)
+        reason = f"HTTP {resp.status_code} from model API"
+        budget.before_retry(delay, reason)
         if logger:
             logger.warning(
-                f"HTTP {resp.status_code} from model API — retrying in "
+                f"{reason} — retrying in "
                 f"{delay:.1f}s (attempt {attempt}/{_MAX_HTTP_ATTEMPTS})"
             )
         time.sleep(delay)

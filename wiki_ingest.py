@@ -14,11 +14,15 @@ Usage:
 
 import argparse
 import functools
+import os
 import sys
+import time
 from pathlib import Path
 
-from agent.common import setup_logger
+from agent import budget
+from agent.common import setup_logger, trim_launchd_log
 from agent.loop import complete_text, run_agent
+from agent.notify import notify_failure
 from agent.wiki_tools import (
     INGEST_TOOL_SCHEMAS,
     append_log,
@@ -48,6 +52,22 @@ MAX_INGEST_ITERATIONS = 30
 # on the 4th identical attempt). Re-attempt a few times in-run before
 # deferring to the next scheduled run.
 MAX_INGEST_ATTEMPTS = 3
+
+# Ceiling on transport retries across everything one source costs — all of its
+# attempts, all of their loop iterations. MAX_INGEST_ATTEMPTS bounds attempts
+# and _MAX_HTTP_ATTEMPTS bounds one call, but nothing bounded the product
+# (30 iterations x 5 http attempts x 3 attempts = up to 450 retries per
+# source). 8 is far more than a healthy run has ever needed and stops a wedged
+# server in well under a minute.
+MAX_RETRIES_PER_SOURCE = 8
+
+# Hard stop for the whole run. The daily job shares one Ollama with the
+# LocalLLMAgent chat server and its tasks, and that Ollama runs with
+# OLLAMA_NUM_PARALLEL=1 — so an ingest that overruns is not just late, it is
+# holding the only slot every other consumer is queued behind. Better to drop
+# the remaining sources (they stay unmarked and are retried tomorrow) than to
+# keep the queue shut.
+DEFAULT_RUN_BUDGET_MINUTES = 45
 
 # A file the sort step can't confidently place goes here rather than blocking
 # ingestion — but only if the vault actually declares a "misc" folder.
@@ -152,9 +172,14 @@ def sort_raw_files(vault_path: str, logger) -> None:
     fallback = SORT_FALLBACK_FOLDER if SORT_FALLBACK_FOLDER in folder_names else None
 
     for filename in unsorted:
+        budget.check(f"sorting '{filename}'")
+        budget.start_source(f"sort of {filename}", MAX_RETRIES_PER_SOURCE)
         content = read_raw_file(vault_path, filename).get("content", "")
         try:
             choice = _classify_raw_file(filename, content, folders)
+        except budget.BudgetExceeded:
+            # Never demoted to "couldn't classify this one" — the run is over.
+            raise
         except Exception as e:
             logger.exception(f"Sorting '{filename}' raised: {e}")
             choice = None
@@ -178,6 +203,68 @@ def sort_raw_files(vault_path: str, logger) -> None:
             )
         else:
             logger.info(f"Sorted '{filename}' -> {result['moved']}")
+
+
+def _ingest_source(vault_path: str, filename: str, system_prompt: str, logger) -> bool:
+    """Run the ingest loop for one source, retrying the no-op failure below.
+    Returns whether any attempt actually wrote to the wiki."""
+    # One retry ceiling for the whole source, spanning every attempt.
+    budget.start_source(filename, MAX_RETRIES_PER_SOURCE)
+
+    for attempt in range(1, MAX_INGEST_ATTEMPTS + 1):
+        # Fresh dispatch + write_counter per attempt — a retried source is
+        # re-processed from scratch. That is safe for the no-op failure
+        # this was written for (the model answers without calling a tool,
+        # so nothing was written), and for page writes generally, since
+        # write_wiki_page and update_index overwrite by name.
+        #
+        # It is NOT fully safe once the model call can fail *mid-loop*,
+        # which a remote provider makes possible (a Gemini 503 that
+        # outlasts the backoff in agent/loop.py). An attempt that wrote
+        # pages and appended to log.md before dying will, on retry,
+        # re-append: append_log is the one non-idempotent tool. The cost
+        # is a duplicate ledger entry, not lost or corrupted pages.
+        write_counter: list = []
+        dispatch = _build_dispatch(vault_path, write_counter)
+        try:
+            result = run_agent(
+                system_prompt=system_prompt,
+                user_prompt=(
+                    f"Ingest the source file '{filename}' from raw/ per the ingest "
+                    "workflow above: read it, create or update the relevant wiki "
+                    "pages with wiki-links between related concepts, update "
+                    "wiki/index.md, and append a wiki/log.md entry describing what "
+                    "changed."
+                ),
+                tools=INGEST_TOOL_SCHEMAS,
+                dispatch=dispatch,
+                logger=logger,
+                max_iterations=MAX_INGEST_ITERATIONS,
+            )
+            logger.info(
+                f"Agent final response for '{filename}' "
+                f"(attempt {attempt}/{MAX_INGEST_ATTEMPTS}): {result}"
+            )
+        except budget.BudgetExceeded:
+            # The whole point of the budget is that it outranks the retry
+            # policy — another attempt is exactly what it exists to prevent.
+            raise
+        except Exception as e:
+            logger.exception(
+                f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' "
+                f"raised: {e}"
+            )
+            continue
+
+        if write_counter:
+            return True
+        logger.warning(
+            f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' produced "
+            "no wiki writes (model returned without calling write_wiki_page or "
+            "append_log)."
+        )
+
+    return False
 
 
 def ingest_vault(vault_path: str, logger) -> int:
@@ -208,59 +295,25 @@ def ingest_vault(vault_path: str, logger) -> int:
         return 0
 
     failures = 0
+    processed = 0
 
     for filename in pending:
         logger.info(f"Ingesting '{filename}'")
-        wrote = False
-        for attempt in range(1, MAX_INGEST_ATTEMPTS + 1):
-            # Fresh dispatch + write_counter per attempt — a retried source is
-            # re-processed from scratch. That is safe for the no-op failure
-            # this was written for (the model answers without calling a tool,
-            # so nothing was written), and for page writes generally, since
-            # write_wiki_page and update_index overwrite by name.
-            #
-            # It is NOT fully safe once the model call can fail *mid-loop*,
-            # which a remote provider makes possible (a Gemini 503 that
-            # outlasts the backoff in agent/loop.py). An attempt that wrote
-            # pages and appended to log.md before dying will, on retry,
-            # re-append: append_log is the one non-idempotent tool. The cost
-            # is a duplicate ledger entry, not lost or corrupted pages.
-            write_counter: list = []
-            dispatch = _build_dispatch(vault_path, write_counter)
-            try:
-                result = run_agent(
-                    system_prompt=system_prompt,
-                    user_prompt=(
-                        f"Ingest the source file '{filename}' from raw/ per the ingest "
-                        "workflow above: read it, create or update the relevant wiki "
-                        "pages with wiki-links between related concepts, update "
-                        "wiki/index.md, and append a wiki/log.md entry describing what "
-                        "changed."
-                    ),
-                    tools=INGEST_TOOL_SCHEMAS,
-                    dispatch=dispatch,
-                    logger=logger,
-                    max_iterations=MAX_INGEST_ITERATIONS,
-                )
-                logger.info(
-                    f"Agent final response for '{filename}' "
-                    f"(attempt {attempt}/{MAX_INGEST_ATTEMPTS}): {result}"
-                )
-            except Exception as e:
-                logger.exception(
-                    f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' "
-                    f"raised: {e}"
-                )
-                continue
-
-            if write_counter:
-                wrote = True
-                break
-            logger.warning(
-                f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' produced "
-                "no wiki writes (model returned without calling write_wiki_page or "
-                "append_log)."
+        try:
+            budget.check(f"'{filename}'")
+            wrote = _ingest_source(vault_path, filename, system_prompt, logger)
+        except budget.BudgetExceeded as e:
+            # Either limit abandons the whole run, not just this source. A
+            # spent retry ceiling means the *server* is unwell — transport
+            # failures are a property of the box, not of the file being read —
+            # so the next source would only burn its own ceiling behind it.
+            logger.error(
+                f"Run stopped after {processed}/{len(pending)} source(s): {e}. "
+                "The remaining sources stay unmarked and are retried on the "
+                "next scheduled run."
             )
+            raise
+        processed += 1
 
         if wrote:
             mark_ingested(vault_path, filename)
@@ -274,22 +327,57 @@ def ingest_vault(vault_path: str, logger) -> int:
     return 1 if failures else 0
 
 
+def _budget_minutes() -> float:
+    raw = os.getenv("WIKI_RUN_BUDGET_MINUTES")
+    if not raw:
+        return DEFAULT_RUN_BUDGET_MINUTES
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_RUN_BUDGET_MINUTES
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vault", required=True, help="Path to the Obsidian vault.")
+    parser.add_argument(
+        "--budget-minutes",
+        type=float,
+        default=None,
+        help="Wall-clock budget for the whole run (default: "
+             f"$WIKI_RUN_BUDGET_MINUTES or {DEFAULT_RUN_BUDGET_MINUTES}).",
+    )
     args = parser.parse_args()
 
     vault_name = Path(args.vault).name
     logger = setup_logger(f"wiki_ingest.{vault_name}")
-    logger.info(f"Starting wiki ingest run for vault: {args.vault}")
+    trim_launchd_log(logger)
 
+    minutes = args.budget_minutes if args.budget_minutes is not None else _budget_minutes()
+    budget.start_run(minutes * 60)
+    logger.info(
+        f"Starting wiki ingest run for vault: {args.vault} "
+        f"(budget {minutes:g} min)"
+    )
+
+    job = f"wiki_ingest[{vault_name}]"
+    started = time.monotonic()
     try:
         rc = ingest_vault(args.vault, logger)
         logger.info("Wiki ingest run complete")
-        return rc
+    except budget.BudgetExceeded as e:
+        mins = (time.monotonic() - started) / 60
+        logger.error(f"Wiki ingest run abandoned after {mins:.1f} min: {e}")
+        notify_failure(job, f"abandoned after {mins:.1f} min — {e}", logger)
+        return 1
     except Exception as e:
         logger.exception(f"Wiki ingest run failed: {e}")
+        notify_failure(job, e, logger)
         return 1
+
+    if rc:
+        notify_failure(job, "one or more sources produced no wiki writes", logger)
+    return rc
 
 
 if __name__ == "__main__":

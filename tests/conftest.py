@@ -59,3 +59,14 @@ class Vault:
 @pytest.fixture
 def vault(tmp_path):
     return Vault(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _clear_budget():
+    """agent/budget.py holds the run's deadline and retry ceiling in module
+    state, so a test that starts one would otherwise leak it into the next."""
+    from agent import budget
+
+    budget.reset()
+    yield
+    budget.reset()
