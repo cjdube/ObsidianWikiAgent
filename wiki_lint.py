@@ -21,6 +21,13 @@ Two passes, split by what each is actually good at:
   model receives the structural findings as context so it does not re-derive
   them.
 
+The prose report goes to stdout, for a human. Alongside it the run is logged
+through setup_logger like the ingest and snapshot jobs are — run boundaries,
+per-section counts, and the judgment pass's tool calls. That is what makes a
+scheduled lint show up as a run in LocalLLMAgent's dashboard, which reports on
+this repo's launchd jobs (see its docs/external-tasks.md). Findings log at INFO,
+never WARNING: they're a weekly read, not an alert.
+
 Usage:
     python wiki_lint.py --vault ~/Documents/llm-wiki-learnings
     python wiki_lint.py --vault ~/Documents/llm-wiki-learnings --deep
@@ -34,6 +41,7 @@ import re
 import sys
 from pathlib import Path
 
+from agent.common import setup_logger
 from agent.loop import run_agent
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
@@ -428,10 +436,19 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    vault_name = Path(args.vault).name
+    logger = setup_logger(f"wiki_lint.{vault_name}")
+    # setup_logger flushes each record to stdout, while print() is block-buffered
+    # when launchd points stdout at a file — without this the prose report and the
+    # log lines interleave out of order in the launchd log.
+    sys.stdout.reconfigure(line_buffering=True)
+
     rules_path = Path(args.vault) / "RULES.md"
     if not rules_path.is_file():
         print(f"error: {rules_path} not found", file=sys.stderr)
         return 1
+
+    logger.info(f"Starting wiki lint run for vault: {args.vault}")
 
     pages = _pages(args.vault)
     today = datetime.date.today()
@@ -457,6 +474,15 @@ def main() -> int:
     else:
         print("\nNo structural problems found.")
 
+    # Counts, not the findings themselves: the prose report above is the thing a
+    # human reads, and duplicating every line into the log would double a report
+    # that is already long. INFO, never WARNING — LocalLLMAgent's log_inspector
+    # reports every WARNING it finds, and a weekly lint result is a dashboard
+    # read, not a 7am phone push.
+    for section, items in findings.items():
+        if items:
+            logger.info(f"{section}: {len(items)}")
+
     if args.deep:
         print("\n---\n\n## Judgment pass\n")
         context = report if count else "The structural pass found no problems."
@@ -465,6 +491,8 @@ def main() -> int:
             "read_wiki_page": functools.partial(read_wiki_page, args.vault),
             "read_index": functools.partial(read_index, args.vault),
         }
+        # logger= gives the run a tool-call timeline (`tool_call name(args) ->
+        # result`), which is the shape LocalLLMAgent's dashboard renders.
         print(run_agent(
             system_prompt=rules_path.read_text(encoding="utf-8") + LINT_WRAPPER
             + "\n\nStructural findings already reported (do not repeat these):\n"
@@ -473,8 +501,16 @@ def main() -> int:
             tools=QUERY_TOOL_SCHEMAS,
             dispatch=dispatch,
             max_iterations=60,
+            logger=logger,
         ))
 
+    # A run that finds problems still RAN — the nonzero exit is for a human or a
+    # CI check, and the completion marker is what the dashboard reads. Logging
+    # findings as a failure would paint every week red.
+    logger.info(
+        f"Wiki lint run complete — {len(pages)} pages checked, "
+        f"{count} structural finding{'' if count == 1 else 's'}"
+    )
     return 1 if count else 0
 
 

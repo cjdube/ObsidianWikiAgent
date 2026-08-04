@@ -126,3 +126,35 @@ def test_failed_push_keeps_the_commit(repo, logger):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert tip == remote_tip
+
+
+# --- run boundaries (what LocalLLMAgent's dashboard parses) ----------------
+
+
+def _log_lines(repo, tmp_path):
+    return (tmp_path / f"vault_snapshot.{repo.name}.log").read_text().splitlines()
+
+
+def test_main_logs_run_boundaries(repo, monkeypatch, tmp_path):
+    # Without these two markers the log is a flat stream of one-off lines and
+    # nothing can tell where one nightly run ends and the next begins.
+    (repo / "new.md").write_text("new", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["vault_snapshot.py", "--vault", str(repo)])
+    assert vs.main() == 0
+
+    lines = _log_lines(repo, tmp_path)
+    assert any(f"Starting vault snapshot run for vault: {repo}" in ln for ln in lines)
+    assert any("Vault snapshot run complete" in ln for ln in lines)
+
+
+def test_failed_run_does_not_log_as_complete(repo, monkeypatch, tmp_path):
+    # A "run complete" line after a failed push would close the run as a
+    # success and paint over the ERROR lines above it.
+    git(repo, "remote", "set-url", "origin", str(tmp_path / "nonexistent.git"))
+    (repo / "new.md").write_text("new", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["vault_snapshot.py", "--vault", str(repo)])
+    assert vs.main() == 1
+
+    lines = _log_lines(repo, tmp_path)
+    assert not any("run complete" in ln for ln in lines)
+    assert any("Vault snapshot run failed" in ln for ln in lines)

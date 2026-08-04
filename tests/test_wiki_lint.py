@@ -6,6 +6,7 @@ vault, so those use the fixture. The model --deep pass is not exercised here.
 """
 
 import datetime
+import re
 
 import pytest
 
@@ -258,6 +259,60 @@ def test_main_dirty_vault_returns_one(vault, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
     assert wl.main() == 1
     assert "orphan" in capsys.readouterr().out
+
+
+# --- run logging (what LocalLLMAgent's dashboard parses) -------------------
+
+
+def _log_lines(vault, tmp_path):
+    return (tmp_path / f"wiki_lint.{vault.root.name}.log").read_text().splitlines()
+
+
+def test_main_logs_run_boundaries(vault, monkeypatch, capsys, tmp_path):
+    # LocalLLMAgent parses run history out of these two markers: a "Starting …
+    # run" line opens a run, a "… run complete" line closes it successfully.
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
+    wl.main()
+
+    lines = _log_lines(vault, tmp_path)
+    assert any(f"Starting wiki lint run for vault: {vault.path}" in ln for ln in lines)
+    assert any("Wiki lint run complete" in ln for ln in lines)
+
+
+def test_findings_log_at_info_not_warning(vault, monkeypatch, capsys, tmp_path):
+    # A weekly lint result is a dashboard read, not an alert — and WARNING is
+    # what LocalLLMAgent's log_inspector pushes to the phone each morning.
+    vault.page("orphan", good_page())
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
+    assert wl.main() == 1
+
+    lines = _log_lines(vault, tmp_path)
+    assert any("Orphan pages: " in ln for ln in lines)
+    assert not any("[WARNING]" in ln or "[ERROR]" in ln for ln in lines)
+
+
+def test_dirty_run_still_logs_as_complete(vault, monkeypatch, capsys, tmp_path):
+    # Findings mean the lint WORKED. Only a crash is a failed run; logging them
+    # as failures would paint every week red on the dashboard.
+    vault.page("orphan", good_page())
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
+    wl.main()
+
+    complete = [ln for ln in _log_lines(vault, tmp_path) if "run complete" in ln]
+    assert len(complete) == 1
+    # One orphan page trips three checks (orphan, index, invented citation).
+    assert "1 pages checked, 3 structural findings" in complete[0]
+
+
+def test_each_log_record_is_one_line(vault, monkeypatch, capsys, tmp_path):
+    # A multi-line record is read as a traceback continuation and lands in the
+    # run's error field, painting a clean run as a failure.
+    vault.page("orphan", good_page())
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path])
+    wl.main()
+
+    stamp = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ \[\w+\] ")
+    assert all(stamp.match(ln) for ln in _log_lines(vault, tmp_path))
 
 
 # --- --fix (safe, mechanical auto-fixes only) ------------------------------

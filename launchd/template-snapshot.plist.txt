@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Reference template for a vault's git snapshot job -- commits and pushes
+<!-- Reference template for a vault's git snapshot job — commits and pushes
      whatever changed in the vault, so the GitHub copy keeps up with a wiki
-     that grows daily. Not itself loaded by launchd -- copy it to a real
+     that grows daily. Not itself loaded by launchd — copy it to a real
      <label>.plist (concrete .plist files are gitignored, so they stay local to
      your machine) and fill in the placeholders.
 
@@ -15,13 +15,13 @@
      Runs at 23:00, deliberately NOT just after the 09:00 ingest: an ingest
      with several new sources routinely takes one to three hours, so an
      early-morning snapshot would usually fire mid-run and commit a
-     half-ingested vault -- pages written but index.md and log.md not yet
+     half-ingested vault — pages written but index.md and log.md not yet
      updated. An end-of-day run clears the ingest by a wide margin and also
      captures that day's hand edits in Obsidian, so a commit dated the 25th
      really does hold the 25th's work.
 
      For tighter recovery granularity, replace StartCalendarInterval with
-     <key>StartInterval</key><integer>3600</integer> -- the script exits
+     <key>StartInterval</key><integer>3600</integer> — the script exits
      without committing when nothing changed, so idle hours add no noise
      (mid-ingest commits become likely again, at the cost of a messier
      history rather than lost work).
@@ -30,7 +30,7 @@
        <YOUR_PREFIX>            reverse-DNS label prefix of your choosing
        <ABSOLUTE_PATH_TO_REPO>  where you cloned this repo
        <VAULT_NAME>             short name for the vault (e.g. learnings)
-       <ABSOLUTE_PATH_TO_VAULT> the vault directory passed to --vault -->
+       <ABSOLUTE_PATH_TO_VAULT> the vault directory the job is pointed at -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -59,6 +59,15 @@
     <string><ABSOLUTE_PATH_TO_REPO>/logs/<VAULT_NAME>-snapshot.launchd.log</string>
     <key>StandardErrorPath</key>
     <string><ABSOLUTE_PATH_TO_REPO>/logs/<VAULT_NAME>-snapshot.launchd.log</string>
+
+    <!-- WREN_RUN_LOG: optional, and only useful if you also run LocalLLMAgent —
+         its dashboard can report on this repo's jobs, and reads run history from
+         the STRUCTURED log named here. Drop the whole block if you don't. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WREN_RUN_LOG</key>
+        <string><ABSOLUTE_PATH_TO_REPO>/logs/vault_snapshot.<VAULT_NAME>.log</string>
+    </dict>
 
     <key>RunAtLoad</key>
     <false/>

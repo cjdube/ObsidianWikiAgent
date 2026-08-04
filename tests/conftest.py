@@ -62,6 +62,23 @@ def vault(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_logs(tmp_path, monkeypatch):
+    """Keep test runs out of the repo's real logs/.
+
+    Every entrypoint's main() calls setup_logger, which resolves
+    agent.common.LOGS_DIR at call time and hands the path to a
+    RotatingFileHandler. Without this, a test that exercises main() writes a
+    fixture-named log into the production directory — which is how
+    logs/vault_snapshot.{nothing,plain,repo2}.log got there. A per-file stub
+    (see test_wiki_ingest.py) is the convention; this is the backstop that
+    makes a missed one harmless.
+    """
+    from agent import common
+
+    monkeypatch.setattr(common, "LOGS_DIR", tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _clear_budget():
     """agent/budget.py holds the run's deadline and retry ceiling in module
     state, so a test that starts one would otherwise leak it into the next."""

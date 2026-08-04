@@ -94,11 +94,24 @@ def main() -> int:
     vault_name = Path(args.vault).name
     logger = setup_logger(f"vault_snapshot.{vault_name}")
 
+    # The two markers a run is bounded by. Without them this job's log is a flat
+    # stream of one-off lines: readable, but nothing can tell where one nightly
+    # run ends and the next begins — so LocalLLMAgent's dashboard, which reports
+    # on this repo's launchd jobs, showed it as zero runs. (See its
+    # docs/external-tasks.md; the ingest has had these markers all along.)
+    logger.info(f"Starting vault snapshot run for vault: {args.vault}")
     try:
-        return snapshot_vault(args.vault, logger)
+        rc = snapshot_vault(args.vault, logger)
     except Exception as e:
         logger.exception(f"Vault snapshot failed: {e}")
         return 1
+    # Conditional, not unconditional: a "run complete" line after a failed push
+    # would close the run as a success and paint over the ERROR lines above it.
+    if rc == 0:
+        logger.info("Vault snapshot run complete")
+    else:
+        logger.error("Vault snapshot run failed")
+    return rc
 
 
 if __name__ == "__main__":

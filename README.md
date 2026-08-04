@@ -10,7 +10,12 @@ page format, citation rules); the Python is the same for all of them.
 
 Sibling project to `LocalLLMAgent` (same Ollama-calling pattern, same
 launchd-scheduling convention) but with no dependency on it — this repo only
-knows about vaults, not calendars or email.
+knows about vaults, not calendars or email. Nor is there a code dependency the
+other way: `LocalLLMAgent`'s dashboard can *report* on these jobs — schedules,
+run history, failures — by reading this repo's `launchd/` and `logs/` directly,
+which needs nothing from here beyond the log format the scripts already use.
+Optional on both sides; see the `WREN_RUN_LOG` key in
+`launchd/template.plist.txt`.
 
 ## Architecture
 
@@ -123,6 +128,14 @@ Once a vault is set up and scheduled, this is the actual workflow:
    `logs/learnings-lint.launchd.log`. That job sets `LLM_PROVIDER=gemini`
    because the judgment pass is where model quality decides whether the
    findings are worth reading — the daily ingests stay on the local default.
+
+   The prose report is for a human; alongside it the run is logged through
+   `setup_logger` like the ingest and snapshot jobs are — run boundaries,
+   per-section counts, and the judgment pass's tool calls, in
+   `logs/wiki_lint.<vault-name>.log`. Findings log at INFO, never WARNING: a
+   weekly audit result is something you read, not something that should page
+   you. A run that finds problems still exits non-zero, but it logs as a
+   completed run — the lint worked.
 7. **Back the vault up to git**, if it has a remote:
    ```bash
    .venv/bin/python vault_snapshot.py --vault ~/Documents/llm-wiki-learnings
