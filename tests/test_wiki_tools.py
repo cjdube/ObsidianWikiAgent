@@ -1,6 +1,8 @@
 """Tests for the pure file-I/O and parsing core in agent/wiki_tools.py."""
 
 import json
+import os
+import time
 
 import pytest
 
@@ -96,66 +98,167 @@ def test_page_summary_missing_returns_empty(vault):
     assert wt._page_summary(vault.path, "a") == ""
 
 
-def test_update_index_appends_missing_pages_under_unfiled(vault):
+# --- _normalize_index: the guarantees every index write carries -------------
+
+
+def test_normalize_appends_missing_pages_under_unfiled(vault):
     vault.page("linked", "# Linked\n\n**Summary**: a linked page.\n")
     vault.page("dropped", "# Dropped\n\n**Summary**: model forgot me.\n")
 
-    result = wt.update_index(vault.path, "# Index\n\n## Topics\n\n- [[linked]]\n")
+    index, unfiled, _ = wt._normalize_index(
+        vault.path, "# Index\n\n## Topics\n\n- [[linked]]\n")
 
-    index = (vault.root / "wiki" / "index.md").read_text()
     assert wt.UNFILED_HEADING in index
     assert "[[dropped]]" in index
     # The already-linked page is not duplicated into Unfiled.
-    unfiled_section = index.split(wt.UNFILED_HEADING, 1)[1]
-    assert "[[linked]]" not in unfiled_section
-    assert result["unfiled"] == 1
+    assert "[[linked]]" not in index.split(wt.UNFILED_HEADING, 1)[1]
+    assert unfiled == 1
 
 
-def test_update_index_no_unfiled_when_all_linked(vault):
+def test_normalize_no_unfiled_when_all_linked(vault):
     vault.page("a", "# A\n\n**Summary**: s.\n")
-    result = wt.update_index(vault.path, "## Topics\n\n- [[a]]\n")
-    index = (vault.root / "wiki" / "index.md").read_text()
+    index, unfiled, _ = wt._normalize_index(vault.path, "## Topics\n\n- [[a]]\n")
     assert wt.UNFILED_HEADING not in index
-    assert result["unfiled"] == 0
+    assert unfiled == 0
 
 
-def test_update_index_delinks_broken_links(vault):
+def test_normalize_delinks_broken_links(vault):
     vault.page("real", "# Real\n\n**Summary**: s.\n")
-    # The model authored one valid link and one garbled/dead link.
-    result = wt.update_index(
+    # One valid link and one garbled/dead link.
+    index, _, delinked = wt._normalize_index(
         vault.path,
         "# Index\n\n## Topics\n\n- [[real]] the good one\n"
         "- [[ai-chat--2026-07-15]] a garbled slug\n",
     )
-    index = (vault.root / "wiki" / "index.md").read_text()
-    assert "[[real]]" in index                      # valid link kept
+    assert "[[real]]" in index                       # valid link kept
     assert "[[ai-chat--2026-07-15]]" not in index    # dead link removed
     assert "a garbled slug" in index                 # description preserved
     assert "ai-chat--2026-07-15" in index            # de-linked to plain text
-    assert result["delinked"] == 1
+    assert delinked == 1
 
 
-def test_update_index_delink_keeps_alias_text(vault):
-    result = wt.update_index(vault.path, "## T\n\n- [[gone|Old Name]] desc\n")
-    index = (vault.root / "wiki" / "index.md").read_text()
+def test_normalize_delink_keeps_alias_text(vault):
+    index, _, delinked = wt._normalize_index(vault.path, "## T\n\n- [[gone|Old Name]] desc\n")
     assert "[[gone|Old Name]]" not in index
     assert "Old Name" in index      # the alias the reader saw is kept as text
-    assert result["delinked"] == 1
+    assert delinked == 1
 
 
-def test_update_index_keeps_valid_links_and_unfiled_intact(vault):
+def test_normalize_keeps_valid_links_and_unfiled_intact(vault):
     # De-linking must not disturb valid links or the Unfiled guarantee.
     vault.page("linked", "# Linked\n\n**Summary**: s.\n")
     vault.page("dropped", "# Dropped\n\n**Summary**: s.\n")
-    result = wt.update_index(
-        vault.path, "## T\n\n- [[linked]]\n- [[ghost]] not a page\n"
-    )
-    index = (vault.root / "wiki" / "index.md").read_text()
+    index, unfiled, delinked = wt._normalize_index(
+        vault.path, "## T\n\n- [[linked]]\n- [[ghost]] not a page\n")
     assert "[[linked]]" in index
     assert "[[ghost]]" not in index
     assert "[[dropped]]" in index          # still appended under Unfiled
-    assert result["unfiled"] == 1
-    assert result["delinked"] == 1
+    assert unfiled == 1
+    assert delinked == 1
+
+
+def test_normalize_backfills_a_bare_entry_from_the_page(vault):
+    # How a stripped index repairs itself: the model wrote index.md down to bare
+    # links on 2026-08-04, and the descriptions come back from the pages.
+    vault.page("a", "# A\n\n**Summary**: what the page is about.\n")
+    index, _, _ = wt._normalize_index(vault.path, "## Topics\n\n- [[a]]\n")
+    assert "- [[a]] what the page is about." in index
+
+
+def test_normalize_does_not_overwrite_an_existing_description(vault):
+    # Filling blanks only, so a description curated by hand in Obsidian
+    # survives the next ingest.
+    vault.page("a", "# A\n\n**Summary**: the page's own wording.\n")
+    index, _, _ = wt._normalize_index(vault.path, "## Topics\n\n- [[a]] my own wording\n")
+    assert "- [[a]] my own wording" in index
+    assert "the page's own wording" not in index
+
+
+# --- update_index: one page, one section ------------------------------------
+
+
+def test_update_index_files_one_page_under_a_section(vault):
+    vault.page("ollama", "# Ollama\n\n**Summary**: runs local models.\n")
+    result = wt.update_index(vault.path, "ollama", "Tools")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "## Tools" in index
+    assert "- [[ollama]] runs local models." in index
+    assert result["filed"] == "ollama"
+
+
+def test_update_index_leaves_the_rest_of_the_file_alone(vault):
+    """The whole point: one call edits one entry, it does not rewrite the file.
+
+    The old whole-document signature is what let a truncated generation
+    overwrite 91 curated descriptions in a single call.
+    """
+    vault.page("old", "# Old\n\n**Summary**: s.\n")
+    vault.page("new", "# New\n\n**Summary**: s.\n")
+    vault.index("# My Wiki\n\n## Established\n\n- [[old]] a description I wrote\n")
+
+    wt.update_index(vault.path, "new", "Established")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "# My Wiki" in index                        # preamble intact
+    assert "- [[old]] a description I wrote" in index  # neighbour untouched
+    assert "- [[new]] s." in index
+
+
+def test_update_index_refiling_moves_rather_than_duplicates(vault):
+    vault.page("a", "# A\n\n**Summary**: s.\n")
+    wt.update_index(vault.path, "a", "First")
+    wt.update_index(vault.path, "a", "Second")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert index.count("[[a]]") == 1
+    assert "- [[a]] s." in index.split("## Second", 1)[1]
+
+
+def test_update_index_sorts_within_a_section(vault):
+    for name in ("zebra", "apple", "mango"):
+        vault.page(name, f"# {name}\n\n**Summary**: s.\n")
+        wt.update_index(vault.path, name, "Fruit")
+
+    section = (vault.root / "wiki" / "index.md").read_text().split("## Fruit", 1)[1]
+    assert [wt._entry_name(ln) for ln in section.splitlines() if wt._entry_name(ln)] \
+        == ["apple", "mango", "zebra"]
+
+
+def test_update_index_new_section_goes_before_unfiled(vault):
+    vault.page("filed", "# Filed\n\n**Summary**: s.\n")
+    vault.page("loose", "# Loose\n\n**Summary**: s.\n")  # never filed -> Unfiled
+
+    wt.update_index(vault.path, "filed", "Topics")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert index.index("## Topics") < index.index(wt.UNFILED_HEADING)
+
+
+def test_update_index_rejects_a_page_that_does_not_exist(vault):
+    result = wt.update_index(vault.path, "ghost", "Topics")
+    assert "error" in result
+    assert not (vault.root / "wiki" / "index.md").exists()
+
+
+def test_update_index_rejects_filing_into_unfiled(vault):
+    # Unfiled is computed, not authored — filing into it would be undone by the
+    # next normalize and reads as "leave this uncategorised".
+    vault.page("a", "# A\n\n**Summary**: s.\n")
+    result = wt.update_index(vault.path, "a", "Unfiled")
+    assert "error" in result
+
+
+def test_update_index_matches_an_existing_heading_case_insensitively(vault):
+    vault.page("a", "# A\n\n**Summary**: s.\n")
+    vault.page("b", "# B\n\n**Summary**: s.\n")
+    vault.index("## Tools & Runtimes\n\n- [[a]] s.\n")
+
+    wt.update_index(vault.path, "b", "tools & runtimes")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert index.count("## Tools & Runtimes") == 1
+    assert index.lower().count("## tools & runtimes") == 1
 
 
 # --- move / sort -----------------------------------------------------------
@@ -215,6 +318,45 @@ def test_list_raw_files_recurses_and_skips_dotfiles(vault):
     vault.raw("b.txt", subdir="daily-notes")
     (vault.root / "raw" / ".hidden").write_text("x", encoding="utf-8")
     assert wt.list_raw_files(vault.path)["files"] == ["a.txt", "b.txt"]
+
+
+def test_list_raw_files_is_oldest_first_not_alphabetical(vault):
+    """The queue order decides who starves when a run hits its budget.
+
+    Alphabetical looks neutral and is not: feeds drop files under stable
+    prefixes, so the same prefix sits at the tail every day. Daily-YouTube-*
+    went unfiled from 2026-07-31 behind Daily-Chrome-* and AI-Chat-Learnings-*.
+    """
+    vault.raw("AI-Chat-Learnings.md")   # sorts first alphabetically, newest
+    vault.raw("Daily-YouTube.md")       # sorts last alphabetically, oldest
+    old = time.time() - 3 * 86400
+    os.utime(vault.root / "raw" / "Daily-YouTube.md", (old, old))
+
+    assert wt.list_raw_files(vault.path)["files"] == [
+        "Daily-YouTube.md", "AI-Chat-Learnings.md"]
+
+
+def test_list_raw_files_ties_break_on_name(vault):
+    # Same mtime must still give a deterministic order.
+    vault.raw("b.md")
+    vault.raw("a.md")
+    same = time.time() - 60
+    for name in ("a.md", "b.md"):
+        os.utime(vault.root / "raw" / name, (same, same))
+
+    assert wt.list_raw_files(vault.path)["files"] == ["a.md", "b.md"]
+
+
+def test_list_raw_files_dates_a_duplicate_name_by_its_older_copy(vault):
+    # One basename is one queue entry (that's the .ingested.json identity), and
+    # how long it has waited is measured from the older copy.
+    vault.raw("recent.md")
+    vault.raw("dupe.md")
+    vault.raw("dupe.md", subdir="daily-notes")
+    old = time.time() - 5 * 86400
+    os.utime(vault.root / "raw" / "dupe.md", (old, old))
+
+    assert wt.list_raw_files(vault.path)["files"] == ["dupe.md", "recent.md"]
 
 
 def test_list_unsorted_raw_files_top_level_only(vault):

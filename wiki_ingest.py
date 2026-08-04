@@ -232,8 +232,9 @@ def _ingest_source(vault_path: str, filename: str, system_prompt: str, logger) -
                 user_prompt=(
                     f"Ingest the source file '{filename}' from raw/ per the ingest "
                     "workflow above: read it, create or update the relevant wiki "
-                    "pages with wiki-links between related concepts, update "
-                    "wiki/index.md, and append a wiki/log.md entry describing what "
+                    "pages with wiki-links between related concepts, call "
+                    "update_index once per page you wrote to file it under a "
+                    "section, and append a wiki/log.md entry describing what "
                     "changed."
                 ),
                 tools=INGEST_TOOL_SCHEMAS,

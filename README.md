@@ -26,12 +26,34 @@ launchd (per-vault .plist, timed)
        -> sorts freshly dropped raw/ files into the subdirectories the
           vault declares under "## Raw folders" (local model picks the
           folder per file; no-op for vaults that declare none)
-       -> finds raw/ sources not yet in wiki/.ingested.json
+       -> finds raw/ sources not yet in wiki/.ingested.json, OLDEST FIRST
        -> for each: tool-calling loop against Ollama's /api/chat
-          (read_raw_file, read/write_wiki_page, read/update_index,
+          (read_raw_file, read/write_wiki_page, read_index, update_index,
            append_log) files it into wiki/, unattended
        -> marks it ingested, logs everything to logs/wiki_ingest.<vault>.log
 ```
+
+### Two rules the ingest queue and index depend on
+
+**The queue is oldest-first, not alphabetical.** The order decides who starves
+when a run hits its budget, and alphabetical order looks neutral while being
+anything but: feeds drop files under stable prefixes, so the same prefix sits
+at the tail every single day. `Daily-YouTube-*` went unfiled from 2026-07-31
+onward behind `Daily-Chrome-*` and `AI-Chat-Learnings-*` — each day added two
+sources that sorted ahead of it while the run only ever reached two. FIFO
+cannot starve anything indefinitely: waiting longest is what earns a turn.
+
+**`update_index` files one page, and never takes the document.** It used to
+accept the whole of `index.md` as a string, which made it the most expensive
+thing in an ingest: regenerating a 45 KB table of contents is ~12k output
+tokens against a 32k context already holding the source and several pages. On
+2026-08-04 the model spent 30 of one run's 45 budgeted minutes on five attempts
+(45426, 45460, 45450, 12224, 3108 chars), timed out three times, and each retry
+came back shorter until a truncated 3 KB stub was written over the real index,
+stripping 91 descriptions. That was not the model failing at its job — it was
+being asked to do Python's. Naming a page and a section is ~15 tokens and
+cannot be truncated into a valid-looking wrong answer. Descriptions come from
+each page's own `**Summary**:` line, so they cannot be fabricated either.
 
 `wiki_query.py --vault <path> "question"` is the read side — manual and
 on-demand only, since a question needs a live human to ask it.

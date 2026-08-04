@@ -98,15 +98,33 @@ def list_raw_files(vault_path: str) -> dict:
 
     Binaries are excluded (see _is_text_source). They are reported separately
     by list_binary_raw_files rather than dropped in silence, because a file
-    dropped into raw/ was put there to be read."""
+    dropped into raw/ was put there to be read.
+
+    OLDEST FIRST, by mtime — this is the ingest queue, and the order decides who
+    starves when a run hits its budget. Alphabetical order looks neutral and is
+    not: feeds drop files under stable prefixes, so the same prefix sits at the
+    tail every single day. Daily-YouTube-* went unfiled from 2026-07-31 onward
+    behind Daily-Chrome-* and AI-Chat-Learnings-*, because each day added two
+    sources that sorted ahead of it and the run only ever reached two. FIFO
+    cannot do that: waiting longest is exactly what earns a source its turn.
+    Ties break on name so the order stays deterministic."""
     raw_dir = _raw_dir(vault_path)
     if not raw_dir.exists():
         return {"files": []}
-    names = {
-        p.name for p in raw_dir.rglob("*")
-        if p.is_file() and not p.name.startswith(".") and _is_text_source(p)
-    }
-    return {"files": sorted(names)}
+    # Keyed by basename (the .ingested.json identity), so a name appearing in
+    # two directories is one queue entry — dated by the older copy, which is how
+    # long that source has actually been waiting.
+    oldest: dict[str, float] = {}
+    for p in raw_dir.rglob("*"):
+        if not p.is_file() or p.name.startswith(".") or not _is_text_source(p):
+            continue
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if p.name not in oldest or mtime < oldest[p.name]:
+            oldest[p.name] = mtime
+    return {"files": [name for name, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))]}
 
 
 def list_binary_raw_files(vault_path: str) -> dict:
@@ -369,25 +387,54 @@ def _page_summary(vault_path: str, name: str) -> str:
     return ""
 
 
-def update_index(vault_path: str, content: str) -> dict:
-    """Overwrite wiki/index.md, guaranteeing every wiki page stays linked.
+_ENTRY_RE = re.compile(r"^- \[\[([^\]]+)\]\]\s*(.*)$")
 
-    The model authors the curated sections, but it rewrites the index from
-    memory and silently drops pages — including ones it created moments
-    earlier in the same run. A dropped page is never re-linked on its own,
-    because its source is already marked ingested and won't be reprocessed, so
-    the loss is permanent (observed 2026-07-14: 73 of 160 pages orphaned).
-    Completeness is therefore enforced here rather than asked for in the
-    prompt: any page missing from `content` is appended under Unfiled.
+
+def _entry_name(line: str) -> str | None:
+    """The page a `- [[name]] description` line points at, or None."""
+    m = _ENTRY_RE.match(line)
+    if not m:
+        return None
+    return m.group(1).split("|", 1)[0].split("#", 1)[0].strip().removesuffix(".md")
+
+
+def _ensure_descriptions(vault_path: str, lines: list[str]) -> list[str]:
+    """Give any bare `- [[page]]` entry the page's own Summary line.
+
+    Fills blanks only — an existing description is left exactly as written, so
+    curating one by hand in Obsidian survives the next ingest. This is what
+    repairs an index the model previously stripped: on 2026-08-04 it rewrote
+    index.md down to bare links, and the 91 curated descriptions came back from
+    the pages themselves rather than from a git restore, which would only have
+    recovered the 91 and left the other 200 as they were.
     """
-    wiki_dir = _wiki_dir(vault_path)
-    wiki_dir.mkdir(parents=True, exist_ok=True)
+    out = []
+    for line in lines:
+        name = _entry_name(line)
+        if name and not _ENTRY_RE.match(line).group(2).strip():
+            summary = _page_summary(vault_path, name)
+            if summary:
+                line = f"- [[{name}]] {summary}"
+        out.append(line)
+    return out
 
+
+def _normalize_index(vault_path: str, body: str) -> tuple[str, int, int]:
+    """The guarantees every index write carries, whoever wrote it.
+
+    The model does not reliably honour instructions about a file's overall
+    shape, so completeness lives in code: any page not linked from `body` is
+    appended under Unfiled rather than lost (observed 2026-07-14, 73 of 160
+    pages orphaned by a rewrite from memory). Dead links are flattened, and
+    bare entries pick up their page's summary.
+    """
     pages = list_wiki_pages(vault_path)["pages"]
     valid = {page[: -len(".md")] for page in pages}
 
-    body = _strip_unfiled(content).rstrip("\n")
+    body = _strip_unfiled(body).rstrip("\n")
     body, delinked = _delink_broken(body, valid)
+    body = "\n".join(_ensure_descriptions(vault_path, body.splitlines()))
+
     linked = _linked_page_names(body)
     unfiled = [
         name for name in (page[: -len(".md")] for page in pages)
@@ -399,10 +446,75 @@ def update_index(vault_path: str, content: str) -> dict:
             for name in unfiled
         )
         body += f"\n\n{UNFILED_HEADING}\n\n{entries}"
+    return body, len(unfiled), delinked
 
-    path = wiki_dir / "index.md"
-    path.write_text(body + "\n", encoding="utf-8")
-    return {"written": "index.md", "unfiled": len(unfiled), "delinked": delinked}
+
+def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
+    """(heading index, end index) of `## section`, or None if it isn't there."""
+    want = section.strip().lstrip("#").strip().casefold()
+    for i, line in enumerate(lines):
+        if line.startswith("## ") and line[3:].strip().casefold() == want:
+            for j in range(i + 1, len(lines)):
+                if lines[j].startswith("## "):
+                    return i, j
+            return i, len(lines)
+    return None
+
+
+def update_index(vault_path: str, page: str, section: str) -> dict:
+    """File ONE page under ONE section heading. Python owns the document.
+
+    This used to take the whole of index.md as a string, and that was the
+    single most expensive thing in an ingest. Regenerating a 45 KB table of
+    contents is ~12k output tokens against a 32k context already holding the
+    source and several pages; on 2026-08-04 the model spent 30 of one run's 45
+    budgeted minutes on five attempts (45426, 45460, 45450, 12224, 3108 chars),
+    timed out three times, and each retry came back shorter until a truncated
+    3 KB stub was written over the real index, stripping 91 descriptions. The
+    run then hit its budget having filed 2 of 5 sources.
+
+    None of that was the model failing at its job — it was being asked to do
+    Python's. Naming a page and a section is ~15 tokens and cannot be truncated
+    into a valid-looking wrong answer.
+    """
+    wiki_dir = _wiki_dir(vault_path)
+    wiki_dir.mkdir(parents=True, exist_ok=True)
+
+    name = page.strip().removesuffix(".md")
+    if name not in {p[: -len(".md")] for p in list_wiki_pages(vault_path)["pages"]}:
+        return {"error": f"no wiki page named '{name}' — write the page first"}
+    section = section.strip().lstrip("#").strip()
+    if not section:
+        return {"error": "section is required, e.g. 'AI & Agent Development'"}
+    if section.casefold() == UNFILED_HEADING[3:].casefold():
+        # Unfiled is computed, not authored: filing INTO it would be undone by
+        # the next normalize and reads as "leave this page uncategorised".
+        return {"error": "'Unfiled' is maintained automatically — name a real section"}
+
+    lines = read_index(vault_path)["content"].splitlines()
+    # Drop any existing entry for this page, wherever it currently sits, so
+    # re-filing moves it instead of listing it twice.
+    lines = [ln for ln in lines if _entry_name(ln) != name]
+    entry = f"- [[{name}]] {_page_summary(vault_path, name)}".rstrip()
+
+    bounds = _section_bounds(lines, section)
+    if bounds is None:
+        # A new section goes before Unfiled, which always stays last.
+        unfiled_at = next(
+            (i for i, ln in enumerate(lines) if ln.strip() == UNFILED_HEADING),
+            len(lines))
+        block = [f"## {section}", "", entry, ""]
+        lines = lines[:unfiled_at] + block + lines[unfiled_at:]
+    else:
+        start, end = bounds
+        body = [ln for ln in lines[start + 1:end] if _entry_name(ln)]
+        body.append(entry)
+        body.sort(key=lambda ln: (_entry_name(ln) or "").casefold())
+        lines = lines[:start + 1] + [""] + body + [""] + lines[end:]
+
+    body, unfiled, delinked = _normalize_index(vault_path, "\n".join(lines))
+    (wiki_dir / "index.md").write_text(body + "\n", encoding="utf-8")
+    return {"filed": name, "section": section, "unfiled": unfiled, "delinked": delinked}
 
 
 def append_log(vault_path: str, entry: str) -> dict:
@@ -502,13 +614,14 @@ UPDATE_INDEX_SCHEMA = {
     "type": "function",
     "function": {
         "name": "update_index",
-        "description": "Overwrite wiki/index.md with the given full content (include every page, not just new ones). Any page you leave out is appended under an '## Unfiled' heading rather than dropped — move those into the section they belong in.",
+        "description": "File ONE page into wiki/index.md under a section heading. Call it once per page you created or changed. NEVER send the whole index — you are naming one page's home, not rewriting the file, and everything else in it is left untouched. The description is taken from the page's own Summary line, so do not write one. Re-filing a page that is already listed moves it to the new section.",
         "parameters": {
             "type": "object",
             "properties": {
-                "content": {"type": "string", "description": "Full new content of index.md."},
+                "page": {"type": "string", "description": "Page name, e.g. 'ollama' (no .md)."},
+                "section": {"type": "string", "description": "Section heading it belongs under, e.g. 'AI & Agent Development'. Use an existing heading from the index where one fits; a new one is created if not."},
             },
-            "required": ["content"],
+            "required": ["page", "section"],
         },
     },
 }
