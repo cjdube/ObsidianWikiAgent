@@ -56,18 +56,18 @@ def head_message(repo):
 
 
 def test_missing_directory_fails(tmp_path, logger):
-    assert vs.snapshot_vault(str(tmp_path / "nope"), logger) == 1
+    assert vs.snapshot_vault(str(tmp_path / "nope"), logger) is not None
 
 
 def test_non_git_directory_fails(tmp_path, logger):
     plain = tmp_path / "plain"
     plain.mkdir()
-    assert vs.snapshot_vault(str(plain), logger) == 1
+    assert vs.snapshot_vault(str(plain), logger) is not None
 
 
 def test_clean_repo_makes_no_commit(repo, logger):
     before = head_message(repo)
-    assert vs.snapshot_vault(str(repo), logger) == 0
+    assert vs.snapshot_vault(str(repo), logger) is None
     assert head_message(repo) == before
 
 
@@ -76,7 +76,7 @@ def test_commits_and_pushes_changes(repo, logger):
     (repo / "wiki" / "new page.md").write_text("body", encoding="utf-8")
     (repo / "seed.md").write_text("edited", encoding="utf-8")
 
-    assert vs.snapshot_vault(str(repo), logger) == 0
+    assert vs.snapshot_vault(str(repo), logger) is None
 
     # Filenames with spaces count as one file, not two.
     assert head_message(repo).endswith(": 2 files")
@@ -112,7 +112,7 @@ def test_failed_push_keeps_the_commit(repo, logger):
     git(other, "push", "-q")
 
     (repo / "mine.md").write_text("mine", encoding="utf-8")
-    assert vs.snapshot_vault(str(repo), logger) == 1
+    assert "git push failed" in vs.snapshot_vault(str(repo), logger)
 
     # Local commit survived, and the other machine's commit is still the tip
     # of the remote — nothing was overwritten.
@@ -150,6 +150,7 @@ def test_main_logs_run_boundaries(repo, monkeypatch, tmp_path):
 def test_failed_run_does_not_log_as_complete(repo, monkeypatch, tmp_path):
     # A "run complete" line after a failed push would close the run as a
     # success and paint over the ERROR lines above it.
+    monkeypatch.setattr(vs, "notify_failure", lambda *a, **k: None)
     git(repo, "remote", "set-url", "origin", str(tmp_path / "nonexistent.git"))
     (repo / "new.md").write_text("new", encoding="utf-8")
     monkeypatch.setattr("sys.argv", ["vault_snapshot.py", "--vault", str(repo)])
@@ -158,3 +159,37 @@ def test_failed_run_does_not_log_as_complete(repo, monkeypatch, tmp_path):
     lines = _log_lines(repo, tmp_path)
     assert not any("run complete" in ln for ln in lines)
     assert any("Vault snapshot run failed" in ln for ln in lines)
+
+
+# --- failure notification --------------------------------------------------
+
+
+def test_main_pushes_the_reason_a_push_failed(repo, monkeypatch, tmp_path):
+    # The bug this alerting exists for: an unreachable remote failed silently
+    # every night for ten nights. The alert has to name the cause, or it just
+    # sends you to the same log nobody was reading.
+    pushed = []
+    monkeypatch.setattr(
+        vs, "notify_failure",
+        lambda job, detail, logger=None: pushed.append((job, str(detail))),
+    )
+    git(repo, "remote", "set-url", "origin", str(tmp_path / "nonexistent.git"))
+    (repo / "new.md").write_text("new", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["vault_snapshot.py", "--vault", str(repo)])
+
+    assert vs.main() == 1
+    assert len(pushed) == 1
+    assert pushed[0][0] == f"vault_snapshot[{repo.name}]"
+    assert "git push failed" in pushed[0][1]
+
+
+def test_main_is_quiet_on_a_clean_run(repo, monkeypatch, tmp_path):
+    # A vault with nothing to commit is the common case; it must not alert.
+    pushed = []
+    monkeypatch.setattr(
+        vs, "notify_failure", lambda *a, **k: pushed.append(1),
+    )
+    monkeypatch.setattr("sys.argv", ["vault_snapshot.py", "--vault", str(repo)])
+
+    assert vs.main() == 0
+    assert pushed == []

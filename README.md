@@ -142,7 +142,22 @@ Once a vault is set up and scheduled, this is the actual workflow:
    ```
    Stages everything, commits as `Vault snapshot <date>: <n> files`, pushes.
    Exits without committing when nothing changed, so it is safe to schedule
-   as often as you like.
+   as often as you like. A failed run pushes an ntfy alert naming the cause
+   (see below) — an offsite backup that quietly stops backing up is the one
+   failure you will not notice on your own.
+
+   **Use an SSH remote, not HTTPS.** An HTTPS remote authenticates through
+   git's `osxkeychain` helper, and a job scheduled overnight wakes the Mac
+   into *dark wake*, where the keychain refuses any access that could need
+   UI. The helper fails with `failed to get: -25320` (`errSecInDarkWake`),
+   git falls back to asking for a username, and `GIT_TERMINAL_PROMPT=0`
+   turns that into a hard failure — every night, while the commits keep
+   succeeding. An SSH remote with a passphrase-less key reads the key file
+   directly and touches no keychain, so it works in dark wake:
+
+   ```bash
+   git -C ~/Documents/llm-wiki-learnings remote set-url origin git@github.com:<you>/<vault>.git
+   ```
 
    This is a separate job from the ingest, deliberately: a vault has two
    writers — the scheduled ingest and you editing in Obsidian — and a step
@@ -259,7 +274,8 @@ non-zero. Delivery is best-effort and never masks the failure it reports.
 Deterministic unit tests cover the file I/O and path safety in
 `agent/wiki_tools.py`, every structural check in `wiki_lint.py`, and the
 agent loop's dispatch/retry plumbing in `agent/loop.py`, and the run budget
-and failure alerting in `agent/budget.py` and `wiki_ingest.py`. The LLM HTTP layer is
+and failure alerting in `agent/budget.py`, `wiki_ingest.py`, and
+`vault_snapshot.py`. The LLM HTTP layer is
 mocked, so no Ollama or Gemini is needed and nothing hits the network.
 
 ```bash
