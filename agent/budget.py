@@ -9,9 +9,9 @@ hours in which the retries themselves *were* the outage for everything else
 talking to that Ollama.
 
 Nothing in the retry path noticed, because every individual wait was
-reasonable. The damage is in the product: OLLAMA_TIMEOUT (600s) x
-_MAX_HTTP_ATTEMPTS (5) x MAX_INGEST_ITERATIONS (30) x MAX_INGEST_ATTEMPTS (3)
-x every pending source. So a run is bounded twice over — by wall clock for
+reasonable. The damage is in the product: OLLAMA_TIMEOUT (300s by default, set
+to 600 in config/.env) x _MAX_HTTP_ATTEMPTS (5) x MAX_INGEST_ITERATIONS (30) x
+MAX_INGEST_ATTEMPTS (3) x every pending source. So a run is bounded twice over — by wall clock for
 the whole process, and by transport retries per source.
 
 Both limits are process-global rather than parameters threaded through the
@@ -20,8 +20,11 @@ model call. agent/loop.py consults them from inside its own retry loop, which
 is where the hours were actually spent; a check that only ran between sources
 would not have stopped that morning's run any sooner.
 
-With no budget started every check is a no-op, so interactive runs, wiki_lint
-and the test suite are unaffected.
+With no budget started every check is a no-op, so interactive runs and the test
+suite are unaffected. wiki_lint starts one for its --deep pass only: that pass
+is a scheduled unattended model conversation and has the same unbounded
+retry product, while its structural pass is pure Python over local files and
+consults nothing here.
 """
 
 import math

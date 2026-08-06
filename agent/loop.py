@@ -6,9 +6,11 @@ model returns a final text response or the iteration cap is hit.
 
 The loop itself is provider-agnostic — only the wire format differs, so each
 provider owns its own request/history translation and shares the tool-dispatch
-step. Ollama is the default: the scheduled daily ingests run locally, and
-Gemini is opt-in per run (LLM_PROVIDER=gemini) for one-off bulk work like a
-full vault rebuild, where synthesis quality matters more than cost.
+step. Ollama is the default: the scheduled daily ingests run locally. Gemini is
+opt-in per run (LLM_PROVIDER=gemini) for the work where synthesis quality
+decides whether the output is worth reading — one-off bulk jobs like a full
+vault rebuild, and the weekly wiki_lint --deep judgment pass, which sets it in
+its .plist. Note that anything it reads leaves the machine.
 """
 
 import inspect

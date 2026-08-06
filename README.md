@@ -1,8 +1,16 @@
 # ObsidianWikiAgent
 
-A fully local tool that maintains one or more Obsidian "LLM wikis" — Andrej
-Karpathy's raw-notes-in, LLM-organized-wiki-out pattern — using a **local
-LLM served by Ollama**. No Anthropic/Claude API calls at runtime.
+A local-first tool that maintains one or more Obsidian "LLM wikis" — Andrej
+Karpathy's raw-notes-in, LLM-organized-wiki-out pattern. The daily ingests run
+against a **local LLM served by Ollama** and send nothing off the box.
+
+There is one opt-in exception, and it is worth knowing about before you put
+anything private in a vault: setting `LLM_PROVIDER=gemini` routes that run to
+Google's API instead, which means the vault pages and raw sources it reads
+leave your machine. Nothing sets it by default — but the weekly lint job
+shipped in `launchd/` does set it for its judgment pass (see step 6 below), so
+that is one scheduled job sending vault content to a third party. Drop the key
+from the plist if you'd rather it stayed local.
 
 Vault-agnostic by design: the script has no idea what subject any given
 vault covers. Every vault supplies its own `RULES.md` (folder structure,
@@ -28,8 +36,8 @@ launchd (per-vault .plist, timed)
           folder per file; no-op for vaults that declare none)
        -> finds raw/ sources not yet in wiki/.ingested.json, OLDEST FIRST
        -> for each: tool-calling loop against Ollama's /api/chat
-          (read_raw_file, read/write_wiki_page, read_index, update_index,
-           append_log) files it into wiki/, unattended
+          (read_raw_file, list_wiki_pages, read/write_wiki_page, read_index,
+           update_index, append_log) files it into wiki/, unattended
        -> marks it ingested, logs everything to logs/wiki_ingest.<vault>.log
 ```
 
@@ -61,7 +69,14 @@ on-demand only, since a question needs a live human to ask it.
 ### `agent/loop.py`
 
 Same `run_agent()` / `complete_text()` pair as `LocalLLMAgent` — a
-tool-calling loop against Ollama's `/api/chat`, capped at 6 iterations.
+tool-calling loop that dispatches to Ollama's `/api/chat` by default, or to
+Gemini's `generateContent` when `LLM_PROVIDER=gemini`. Only the wire format
+differs; each provider owns its own request/history translation and they share
+the tool-dispatch step.
+
+The 6-iteration cap is only the default for callers that don't say otherwise —
+`wiki_ingest.py` raises it to 30 (one source can touch 10–15 pages) and
+`wiki_lint.py --deep` to 60.
 
 ### `agent/wiki_tools.py`
 
@@ -70,17 +85,30 @@ function takes `vault_path` explicitly, so the same functions serve any
 vault. `INGEST_TOOL_SCHEMAS` / `QUERY_TOOL_SCHEMAS` are the OpenAI-style
 tool schemas passed to `run_agent`.
 
+It also has a small CLI for inspecting what the agent would see, which is the
+quickest way to check the ingest queue's order or spot a page the model filed
+under a name you didn't expect:
+
+```bash
+.venv/bin/python -m agent.wiki_tools list-raw --vault ~/Documents/llm-wiki-learnings
+.venv/bin/python -m agent.wiki_tools list-wiki --vault ~/Documents/llm-wiki-learnings
+```
+
 ## Setup (from scratch)
 
-1. Install [Ollama](https://ollama.com) and pull a tool-calling-capable
-   model (e.g. `ollama pull gemma4`). Verify: `ollama list`.
+1. Install [Ollama](https://ollama.com) and pull a **tool-calling-capable**
+   model — the ingest is nothing but tool calls, so a model without that
+   support fails every run. Verify with `ollama list`, and set `OLLAMA_MODEL`
+   to the exact tag it prints: a bare family name like `gemma4` is not a tag
+   Ollama resolves, and the machine this was built on runs
+   `OLLAMA_MODEL=gemma4:26b-mlx`.
 2. Create the venv:
    ```bash
    python3.12 -m venv .venv
    .venv/bin/pip install -r requirements.txt
    ```
-3. Copy `config/.env.example` to `config/.env` — defaults to
-   `OLLAMA_MODEL=gemma4`, `OLLAMA_HOST=http://localhost:11434`.
+3. Copy `config/.env.example` to `config/.env` and set `OLLAMA_MODEL` to your
+   tag from step 1. `OLLAMA_HOST` defaults to `http://localhost:11434`.
 4. For each vault, make sure it has:
    ```
    <vault>/RULES.md   -- folder structure, page format, citation rules
@@ -134,15 +162,23 @@ Once a vault is set up and scheduled, this is the actual workflow:
    ```bash
    .venv/bin/python wiki_lint.py --vault ~/Documents/llm-wiki-learnings
    ```
-   Report-only — it never edits the vault. Structural checks (broken and
-   self links, orphan pages, index gaps, page format, duplicate titles) run
-   in Python, so they are instant, free, and cannot miss a page. Exits
+   Report-only by default — without `--fix` it never writes to the vault.
+   Structural checks (broken and self links, orphan pages, index gaps, page
+   format, misspelled slugs, duplicate titles, template twins, lens integrity)
+   run in Python, so they are instant, free, and cannot miss a page. Exits
    non-zero when it finds something.
 
    Add `--deep` for the checks code can't do — contradictions between pages,
    one concept split across two names, out-of-scope pages, and claims a newer
    source has overtaken. That pass calls the model, so it costs a couple of
    minutes.
+
+   Add `--fix` to apply the two mechanical fixes that need no judgment:
+   stripping self-links, and de-linking index entries pointing at pages that
+   no longer exist. This is the only way `wiki_lint.py` writes to the vault,
+   and it is deliberately narrow — every judgment call (which of two
+   overlapping pages survives, whether an orphan earns its page, a bad date, an
+   invented citation) is left for you.
 
    The learnings vault also audits itself weekly
    (`launchd/com.<your-prefix>.wikiagent.learnings-lint.plist`, Sunday 10:00,
@@ -294,11 +330,11 @@ non-zero. Delivery is best-effort and never masks the failure it reports.
 ## Running the tests
 
 Deterministic unit tests cover the file I/O and path safety in
-`agent/wiki_tools.py`, every structural check in `wiki_lint.py`, and the
-agent loop's dispatch/retry plumbing in `agent/loop.py`, and the run budget
-and failure alerting in `agent/budget.py`, `wiki_ingest.py`, and
-`vault_snapshot.py`. The LLM HTTP layer is
-mocked, so no Ollama or Gemini is needed and nothing hits the network.
+`agent/wiki_tools.py`, every structural check in `wiki_lint.py`, the agent
+loop's dispatch/retry plumbing in `agent/loop.py`, and the run budget and
+failure alerting in `agent/budget.py`, `wiki_ingest.py`, `wiki_lint.py` and
+`vault_snapshot.py`. The LLM HTTP layer is mocked, so no Ollama or Gemini is
+needed and nothing hits the network.
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
@@ -308,5 +344,8 @@ mocked, so no Ollama or Gemini is needed and nothing hits the network.
 ## What's NOT here
 
 - No Anthropic/Claude API usage at runtime — Claude Code was only used to
-  *write* this code.
-- `config/.env` and `logs/*.log` are gitignored.
+  *write* this code. The one external API this can call is Gemini, and only
+  when `LLM_PROVIDER=gemini` is set for that run (see the top of this file).
+- `config/.env` and `logs/*.log*` are gitignored — the trailing `*` covers the
+  rotated `.log.1` backups, which contain every tool call's full result and so
+  hold verbatim vault content.
