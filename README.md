@@ -7,10 +7,11 @@ against a **local LLM served by Ollama** and send nothing off the box.
 There is one opt-in exception, and it is worth knowing about before you put
 anything private in a vault: setting `LLM_PROVIDER=gemini` routes that run to
 Google's API instead, which means the vault pages and raw sources it reads
-leave your machine. Nothing sets it by default — but the weekly lint job
-shipped in `launchd/` does set it for its judgment pass (see step 6 below), so
-that is one scheduled job sending vault content to a third party. Drop the key
-from the plist if you'd rather it stayed local.
+leave your machine. Nothing here turns it on: the default is Ollama, and no
+plist template in `launchd/` sets it. It is a per-run or per-job opt-in you
+have to make yourself — worth knowing up front because the weekly lint job is
+where it is tempting (see step 6 below), and a scheduled job you configure that
+way sends vault content to a third party every week.
 
 Vault-agnostic by design: the script has no idea what subject any given
 vault covers. Every vault supplies its own `RULES.md` (folder structure,
@@ -185,12 +186,15 @@ Once a vault is set up and scheduled, this is the actual workflow:
    overlapping pages survives, whether an orphan earns its page, a bad date, an
    invented citation) is left for you.
 
-   The learnings vault also audits itself weekly
-   (`launchd/com.<your-prefix>.wikiagent.learnings-lint.plist`, Sunday 10:00,
-   after that morning's ingest); its report lands in
-   `logs/learnings-lint.launchd.log`. That job sets `LLM_PROVIDER=gemini`
-   because the judgment pass is where model quality decides whether the
-   findings are worth reading — the daily ingests stay on the local default.
+   A vault can audit itself on a schedule too, with a lint plist you write the
+   same way as an ingest one (there is no lint template — copy
+   `launchd/template.plist.txt` and point `ProgramArguments` at `wiki_lint.py`).
+   The setup this was built against runs Sunday 10:00, after that morning's
+   ingest, and lands its report in `logs/<vault-name>-lint.launchd.log`. That
+   plist is also where `LLM_PROVIDER=gemini` gets set, because the judgment
+   pass is where model quality decides whether the findings are worth reading —
+   a deliberate, per-job choice, and the one place vault content leaves the
+   machine. The daily ingests stay on the local default.
 
    The prose report is for a human; alongside it the run is logged through
    `setup_logger` like the ingest and snapshot jobs are — run boundaries,

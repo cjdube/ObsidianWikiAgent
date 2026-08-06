@@ -18,10 +18,13 @@ to the vault.
 Three exceptions, all in your control:
 
 - **`LLM_PROVIDER=gemini`** sends the vault pages and raw sources that run
-  reads to Google's API. Nothing sets it by default, but the weekly lint job in
-  `launchd/template.plist.txt` does set it for its judgment pass — so if you
-  schedule that job as shipped, vault content goes to a third party every week.
-  Drop the key from the plist to keep it local.
+  reads to Google's API. Nothing in this repo turns it on: `DEFAULT_PROVIDER`
+  is `ollama`, `config/.env.example` ships the line commented out, and neither
+  plist template sets it. Switching it on is a choice you make — per run
+  (`LLM_PROVIDER=gemini .venv/bin/python wiki_ingest.py …`), or per job by
+  adding it to a plist's `EnvironmentVariables`. Concrete plists are
+  gitignored, so that choice never travels with a clone; if you make it for a
+  scheduled job, vault content goes to a third party on that job's schedule.
 - **ntfy failure alerts** (`NTFY_URL`) carry the job name and an error string.
   The error can include a source filename or path, so a filename is the most
   that escapes this way — never page content.
