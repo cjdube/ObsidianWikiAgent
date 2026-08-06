@@ -1,7 +1,11 @@
 .venv/
 __pycache__/
 config/.env
-logs/*.log
+# The trailing * matters: RotatingFileHandler names its backups .log.1, .log.2,
+# which `logs/*.log` does not match. Those backups hold every tool call's full
+# JSON result — i.e. verbatim raw-source and wiki-page content — so leaving them
+# trackable puts private vault content one `git add -A` away from a commit.
+logs/*.log*
 .DS_Store
 
 # Personal launchd jobs — concrete paths/labels stay local. Copy
