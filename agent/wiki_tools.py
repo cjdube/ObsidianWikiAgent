@@ -1,5 +1,5 @@
 """File I/O against an Obsidian vault, parameterized by vault_path so the
-same functions work against any vault ([vault] today, others later).
+same functions work against any vault (one today, others later).
 
 Every function takes vault_path explicitly rather than reading it from env —
 that's what lets one script serve N vaults with zero per-vault code.

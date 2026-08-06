@@ -11,3 +11,7 @@ logs/*.log*
 # Personal launchd jobs — concrete paths/labels stay local. Copy
 # launchd/template.plist.txt to make your own; the template is tracked.
 launchd/*.plist
+
+# Claude Code local state: per-machine permissions, scratch worktrees. Only a
+# machine-global ignore was covering these, which doesn't survive a clone.
+.claude/
