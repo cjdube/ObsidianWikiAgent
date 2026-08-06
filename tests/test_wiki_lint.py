@@ -130,6 +130,15 @@ def test_check_format_non_iso_date(vault):
     assert any("non-ISO 'Last updated'" in f for f in findings)
 
 
+@pytest.mark.parametrize("updated", ["2026-13-45", "2026-02-30", "0000-00-00"])
+def test_check_format_impossible_date_is_reported_not_raised(vault, updated):
+    # Well-formed enough to pass the \d{4}-\d{2}-\d{2} shape check, but not a
+    # real date — this used to abort the whole run inside fromisoformat.
+    vault.raw("note.txt")
+    findings = wl.check_format(vault.path, {"a": good_page(updated=updated)}, TODAY)
+    assert any("non-ISO 'Last updated'" in f for f in findings)
+
+
 def test_check_format_future_date(vault):
     vault.raw("note.txt")
     findings = wl.check_format(vault.path, {"a": good_page(updated="2026-12-31")}, TODAY)
@@ -176,6 +185,40 @@ def test_cited_sources_splits_unresolvable_citation_on_its_commas():
 def test_cited_sources_prefers_the_longest_run_that_resolves():
     raw = {"a.md", "b.md", "a.md, b.md"}
     assert wl._cited_sources("a.md, b.md", raw) == ["a.md, b.md"]
+
+
+# --- check_slug_typos ------------------------------------------------------
+
+
+def test_check_slug_typos_flags_the_misspelled_slug():
+    # The real 2026-08-05 defect: titled 'Ollama', filed as 'olloma'.
+    pages = {"olloma-thread-wedges": good_page(title="Ollama Thread Wedges")}
+    findings = wl.check_slug_typos(pages)
+    assert any("looks like a typo" in f for f in findings)
+
+
+@pytest.mark.parametrize(
+    "slug,title",
+    [
+        # Separator-only differences, all legitimate and all seen in the vault.
+        ("innovators-dilemma", "Innovator's Dilemma"),
+        ("local-llm-agent", "LocalLLMAgent"),
+        ("context-routing-tradeoffs", "Context Routing Trade-offs"),
+        ("destructive_command_guard", "Destructive Command Guard"),
+        ("osxkeychain-dark-wake-issues", "OSX Keychain Dark Wake Issues"),
+        # A deliberately shortened slug is two characters off, not one.
+        ("hybrid-agent-architecture", "Hybrid AI Agent Architecture"),
+        # A retitle is nowhere near its slug.
+        ("ai-chat-learnings-2026-07-02", "AI Chat Learnings - July 2, 2026"),
+    ],
+)
+def test_check_slug_typos_ignores_legitimate_divergence(slug, title):
+    assert wl.check_slug_typos({slug: good_page(title=title)}) == []
+
+
+def test_check_slug_typos_skips_untitled_pages():
+    # check_format already reports the missing heading; don't double-report.
+    assert wl.check_slug_typos({"a": "no heading\n"}) == []
 
 
 # --- check_duplicate_titles ------------------------------------------------
@@ -406,3 +449,89 @@ def test_check_lens_frontmatter_flags_frontmatter_without_the_marker():
 def test_check_lens_frontmatter_ignores_ordinary_pages():
     page = "# Colima\n\n**Summary**: A container runtime.\n"
     assert wl.check_lens_frontmatter({"colima": page}) == []
+
+
+# --- main(): run boundaries, alerting, and the --deep budget ----------------
+
+
+def _lint_argv(vault, *extra):
+    return ["wiki_lint.py", "--vault", vault.path, *extra]
+
+
+def test_main_is_quiet_when_it_only_finds_problems(vault, monkeypatch):
+    """Findings are a weekly read, not a 7am phone push. The run still exits
+    non-zero for a human or a CI check, but it must not alert."""
+    pushed = []
+    monkeypatch.setattr(wl, "notify_failure", lambda *a, **k: pushed.append(1))
+    vault.page("orphan", good_page())
+    vault.index("# Index\n")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault))
+
+    assert wl.main() == 1  # findings -> non-zero
+    assert pushed == []
+
+
+def test_main_pushes_an_alert_when_the_run_crashes(vault, monkeypatch):
+    # A weekly unattended audit that dies leaves no trace anyone reads: the
+    # report just doesn't appear, which looks the same as a clean week.
+    pushed = []
+    monkeypatch.setattr(
+        wl, "notify_failure",
+        lambda job, detail, logger=None: pushed.append((job, str(detail))),
+    )
+    monkeypatch.setattr(wl, "_pages", lambda _: (_ for _ in ()).throw(OSError("disk")))
+    monkeypatch.setattr("sys.argv", _lint_argv(vault))
+
+    assert wl.main() == 1
+    assert len(pushed) == 1
+    assert pushed[0][0] == f"wiki_lint[{vault.root.name}]"
+    assert "disk" in pushed[0][1]
+
+
+def test_main_starts_a_budget_only_for_the_deep_pass(vault, monkeypatch):
+    """The structural pass is local Python and consults no budget, so starting
+    one for it would bound nothing. --deep is the pass that can hang."""
+    from agent import budget
+
+    vault.page("a", good_page())
+    vault.index("# Index\n\n- [[a]] s.\n")
+
+    monkeypatch.setattr("sys.argv", _lint_argv(vault))
+    wl.main()
+    assert budget.remaining() is None
+
+    monkeypatch.setattr(wl, "run_agent", lambda **kw: "no findings")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+    wl.main()
+    assert budget.remaining() is not None
+    assert budget.remaining() <= wl.DEEP_RUN_BUDGET_MINUTES * 60
+
+
+def test_main_turns_an_exhausted_budget_into_an_alert(vault, monkeypatch):
+    from agent import budget
+
+    pushed = []
+    monkeypatch.setattr(
+        wl, "notify_failure",
+        lambda job, detail, logger=None: pushed.append((job, str(detail))),
+    )
+
+    def _wedged(**kwargs):
+        raise budget.BudgetExceeded("run budget exhausted before model request")
+
+    monkeypatch.setattr(wl, "run_agent", _wedged)
+    vault.page("a", good_page())
+    vault.index("# Index\n\n- [[a]] s.\n")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+
+    assert wl.main() == 1
+    assert len(pushed) == 1
+    assert "abandoned" in pushed[0][1]
+
+
+def test_check_format_accepts_a_citation_to_a_binary_source(vault):
+    """A PNG in raw/ is hidden from the model but is still a real file, so a
+    page citing it has not invented anything."""
+    vault.raw("scan.png", content="\x00\x01binary")
+    findings = wl.check_format(vault.path, {"a": good_page(sources="scan.png")}, TODAY)
+    assert findings == []

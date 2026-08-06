@@ -70,7 +70,7 @@ def test_read_raw_file_reads_and_falls_back_to_subdir(vault):
     ],
 )
 def test_linked_page_names(content, expected):
-    assert wt._linked_page_names(content) == expected
+    assert wt.linked_page_names(content) == expected
 
 
 # --- index maintenance -----------------------------------------------------
@@ -223,6 +223,49 @@ def test_update_index_sorts_within_a_section(vault):
     section = (vault.root / "wiki" / "index.md").read_text().split("## Fruit", 1)[1]
     assert [wt._entry_name(ln) for ln in section.splitlines() if wt._entry_name(ln)] \
         == ["apple", "mango", "zebra"]
+
+
+def test_update_index_keeps_hand_written_content_in_a_section(vault):
+    """A section is not just its entry lines — a human edits this file too.
+
+    Rebuilding the body from `- [[page]]` lines alone deleted prose and
+    sub-headings on the next ingest that touched the section, silently, with the
+    call still reporting success.
+    """
+    vault.page("foo", "# Foo\n\n**Summary**: a summary.\n")
+    vault.index(
+        "# Index\n\n## Tools\n\n"
+        "Hand-written note about this section.\n\n"
+        "### Sub-heading\n\n"
+        "- [[foo]] a summary.\n"
+    )
+
+    wt.update_index(vault.path, "foo", "Tools")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "Hand-written note about this section." in index
+    assert "### Sub-heading" in index
+    assert index.count("[[foo]]") == 1
+
+
+def test_update_index_sorts_into_the_trailing_run_not_across_sub_headings(vault):
+    # Entries grouped under sub-headings keep their groups: the new entry joins
+    # the last run rather than being flattened into one alphabetical list.
+    for name in ("alpha", "zulu", "mike"):
+        vault.page(name, f"# {name}\n\n**Summary**: s.\n")
+    vault.index(
+        "## Tools\n\n### CLI\n\n- [[zulu]] s.\n\n### GUI\n\n- [[alpha]] s.\n"
+    )
+
+    wt.update_index(vault.path, "mike", "Tools")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "### CLI" in index and "### GUI" in index
+    # zulu stays put under CLI; mike sorts into the GUI run alongside alpha.
+    cli, gui = index.split("### GUI", 1)
+    assert "[[zulu]]" in cli and "[[mike]]" not in cli
+    assert [wt._entry_name(ln) for ln in gui.splitlines() if wt._entry_name(ln)] \
+        == ["alpha", "mike"]
 
 
 def test_update_index_new_section_goes_before_unfiled(vault):

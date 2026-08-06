@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import re
 import sys
@@ -42,7 +43,7 @@ def _safe_page_path(vault_path: str, name: str) -> Path:
     filename = name if name.endswith(".md") else f"{name}.md"
     wiki_dir = _wiki_dir(vault_path).resolve()
     candidate = (wiki_dir / filename).resolve()
-    if wiki_dir not in candidate.parents and candidate != wiki_dir:
+    if wiki_dir not in candidate.parents:
         raise ValueError(f"page name '{name}' resolves outside the wiki directory")
     return candidate
 
@@ -54,7 +55,7 @@ def _safe_raw_path(vault_path: str, name: str) -> Path:
     same containment guard."""
     raw_dir = _raw_dir(vault_path).resolve()
     candidate = (raw_dir / name).resolve()
-    if raw_dir not in candidate.parents and candidate != raw_dir:
+    if raw_dir not in candidate.parents:
         raise ValueError(f"raw file name '{name}' resolves outside the raw directory")
     return candidate
 
@@ -151,8 +152,10 @@ def read_raw_file(vault_path: str, filename: str) -> dict:
         # Sorted into a subdirectory since it was last at the top level; find
         # it by basename anywhere under raw/. rglob stays under raw_dir, so the
         # fallback can't escape even though the guard above only vetted the
-        # direct path.
-        matches = [p for p in raw_dir.rglob(filename) if p.is_file()]
+        # direct path. glob.escape because the name comes from the model: an
+        # unescaped '*' or '[' would make this match some *other* file and
+        # return it as though it were the one asked for.
+        matches = [p for p in raw_dir.rglob(glob.escape(filename)) if p.is_file()]
         if not matches:
             return {"error": f"raw file '{filename}' not found"}
         path = matches[0]
@@ -307,7 +310,7 @@ def read_index(vault_path: str) -> dict:
 UNFILED_HEADING = "## Unfiled"
 
 
-def _linked_page_names(content: str) -> set[str]:
+def linked_page_names(content: str) -> set[str]:
     """Page names already linked from index content, as bare stems —
     [[foo]], [[foo.md]], [[foo|alias]] and [[foo#section]] all mean foo."""
     names = set()
@@ -320,7 +323,7 @@ def _linked_page_names(content: str) -> set[str]:
     return names
 
 
-def _delink_broken(content: str, valid: set[str]) -> tuple[str, int]:
+def delink_broken(content: str, valid: set[str]) -> tuple[str, int]:
     """Replace any [[link]] whose target is not a real page with its plain
     display text, returning the cleaned content and the count de-linked.
 
@@ -419,7 +422,9 @@ def _ensure_descriptions(vault_path: str, lines: list[str]) -> list[str]:
     return out
 
 
-def _normalize_index(vault_path: str, body: str) -> tuple[str, int, int]:
+def _normalize_index(
+    vault_path: str, body: str, pages: list[str] = None
+) -> tuple[str, int, int]:
     """The guarantees every index write carries, whoever wrote it.
 
     The model does not reliably honour instructions about a file's overall
@@ -427,26 +432,70 @@ def _normalize_index(vault_path: str, body: str) -> tuple[str, int, int]:
     appended under Unfiled rather than lost (observed 2026-07-14, 73 of 160
     pages orphaned by a rewrite from memory). Dead links are flattened, and
     bare entries pick up their page's summary.
+
+    `pages` lets a caller that has already listed the vault hand that work over
+    instead of paying for the scan twice; it is derived here when omitted, so
+    this stays callable on its own.
     """
-    pages = list_wiki_pages(vault_path)["pages"]
+    pages = list_wiki_pages(vault_path)["pages"] if pages is None else pages
     valid = {page[: -len(".md")] for page in pages}
 
     body = _strip_unfiled(body).rstrip("\n")
-    body, delinked = _delink_broken(body, valid)
+    body, delinked = delink_broken(body, valid)
     body = "\n".join(_ensure_descriptions(vault_path, body.splitlines()))
 
-    linked = _linked_page_names(body)
-    unfiled = [
-        name for name in (page[: -len(".md")] for page in pages)
-        if name not in linked
-    ]
+    linked = linked_page_names(body)
+    unfiled = [name for name in valid if name not in linked]
     if unfiled:
         entries = "\n".join(
             f"- [[{name}]] {_page_summary(vault_path, name)}".rstrip()
-            for name in unfiled
+            for name in sorted(unfiled)
         )
         body += f"\n\n{UNFILED_HEADING}\n\n{entries}"
     return body, len(unfiled), delinked
+
+
+def _trimmed(lines: list[str]) -> list[str]:
+    """`lines` without leading or trailing blanks — blank lines around a block
+    are formatting this module re-adds itself, not content worth preserving."""
+    out = list(lines)
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return out
+
+
+def _file_into_section(body: list[str], entry: str) -> list[str]:
+    """Add `entry` to one section's body, sorted into the run of entries that
+    ends it, and leave every other line exactly where its author put it.
+
+    This used to rebuild the body from its entry lines alone, which silently
+    deleted anything else under the heading — intro prose, '### ' sub-headings,
+    any hand-written note. That is the same loss of human curation that
+    write_wiki_page's frontmatter guard and _ensure_descriptions were each
+    written to stop, one level up in the document: the index is edited by a
+    person in Obsidian as well as by this code, and only one of the two can
+    notice something went missing.
+
+    Sorting is therefore scoped to the trailing run rather than the section. A
+    section that is nothing but entries — the common case — is one such run, so
+    it still sorts whole; a section whose entries are grouped under sub-headings
+    keeps its groups instead of being flattened into one alphabetical list.
+    """
+    tail = len(body)
+    while tail and not body[tail - 1].strip():
+        tail -= 1
+    head = tail
+    while head and _entry_name(body[head - 1]):
+        head -= 1
+
+    run = sorted(
+        body[head:tail] + [entry],
+        key=lambda ln: (_entry_name(ln) or "").casefold(),
+    )
+    kept = _trimmed(body[:head])
+    return kept + ([""] if kept else []) + run
 
 
 def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
@@ -480,8 +529,13 @@ def update_index(vault_path: str, page: str, section: str) -> dict:
     wiki_dir = _wiki_dir(vault_path)
     wiki_dir.mkdir(parents=True, exist_ok=True)
 
+    # Listed once and handed to _normalize_index below: this used to scan the
+    # whole wiki directory twice per call, and the ingest calls it once per page
+    # it writes.
+    pages = list_wiki_pages(vault_path)["pages"]
+
     name = page.strip().removesuffix(".md")
-    if name not in {p[: -len(".md")] for p in list_wiki_pages(vault_path)["pages"]}:
+    if name not in {p[: -len(".md")] for p in pages}:
         return {"error": f"no wiki page named '{name}' — write the page first"}
     section = section.strip().lstrip("#").strip()
     if not section:
@@ -507,12 +561,12 @@ def update_index(vault_path: str, page: str, section: str) -> dict:
         lines = lines[:unfiled_at] + block + lines[unfiled_at:]
     else:
         start, end = bounds
-        body = [ln for ln in lines[start + 1:end] if _entry_name(ln)]
-        body.append(entry)
-        body.sort(key=lambda ln: (_entry_name(ln) or "").casefold())
+        body = _file_into_section(lines[start + 1:end], entry)
         lines = lines[:start + 1] + [""] + body + [""] + lines[end:]
 
-    body, unfiled, delinked = _normalize_index(vault_path, "\n".join(lines))
+    body, unfiled, delinked = _normalize_index(
+        vault_path, "\n".join(lines), pages=pages
+    )
     (wiki_dir / "index.md").write_text(body + "\n", encoding="utf-8")
     return {"filed": name, "section": section, "unfiled": unfiled, "delinked": delinked}
 

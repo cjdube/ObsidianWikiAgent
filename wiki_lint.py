@@ -41,12 +41,15 @@ import re
 import sys
 from pathlib import Path
 
-from agent.common import setup_logger
+from agent import budget
+from agent.common import setup_logger, trim_launchd_log
 from agent.loop import run_agent
+from agent.notify import notify_failure
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
-    _delink_broken,
-    _linked_page_names,
+    delink_broken,
+    linked_page_names,
+    list_binary_raw_files,
     list_raw_files,
     list_wiki_pages,
     read_index,
@@ -54,6 +57,14 @@ from agent.wiki_tools import (
 )
 
 RESERVED = ("index.md", "log.md")
+
+# Bounds for the --deep pass only. This is a scheduled unattended job against a
+# provider that can be slow or down, and 60 iterations x 5 HTTP attempts is the
+# same unbounded product that had wiki_ingest retrying for three hours. Smaller
+# than the ingest's 45 minutes because this is one conversation, not a queue of
+# sources: the pass normally costs a couple of minutes.
+DEEP_RUN_BUDGET_MINUTES = 30
+MAX_DEEP_RETRIES = 8
 
 LINT_WRAPPER = """
 
@@ -92,11 +103,18 @@ def _field(content: str, label: str) -> str | None:
     return None
 
 
+def _title(content: str) -> str | None:
+    """The page's '# Title' heading, or None if it has none."""
+    return next(
+        (l[2:].strip() for l in content.splitlines() if l.startswith("# ")), None
+    )
+
+
 def check_links(pages: dict[str, str]) -> list[str]:
     """Wiki-links pointing at pages that do not exist, and self-links."""
     findings = []
     for slug, content in sorted(pages.items()):
-        for target in sorted(_linked_page_names(content)):
+        for target in sorted(linked_page_names(content)):
             if target == slug:
                 findings.append(f"{slug}.md links to itself — remove the self-link.")
             elif target not in pages:
@@ -122,7 +140,7 @@ def check_orphans(pages: dict[str, str]) -> list[str]:
     notes by nature, and still count as linkers to the pages they reference."""
     inbound = {slug: set() for slug in pages}
     for slug, content in pages.items():
-        for target in _linked_page_names(content):
+        for target in linked_page_names(content):
             if target in inbound and target != slug:
                 inbound[target].add(slug)
     return [
@@ -136,7 +154,7 @@ def check_orphans(pages: dict[str, str]) -> list[str]:
 def check_index(vault_path: str, pages: dict[str, str]) -> list[str]:
     """Index completeness in both directions. update_index guarantees every
     page is listed, but it never prunes links to pages that were deleted."""
-    linked = _linked_page_names(read_index(vault_path)["content"])
+    linked = linked_page_names(read_index(vault_path)["content"])
     findings = [
         f"{slug}.md is not linked from index.md — update_index should have "
         f"caught this; check it ran."
@@ -180,14 +198,79 @@ def _cited_sources(sources: str, raw: set[str]) -> list[str]:
     return cited
 
 
+def _letters(s: str) -> str:
+    """A name reduced to its letters and digits, for comparing a slug against a
+    title without tripping over how each spells the gaps between words."""
+    return re.sub(r"[^a-z0-9]", "", s.lower().replace("&", "and"))
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance. Only ever called on two spellings of one page
+    name, so the quadratic cost is over a few dozen characters."""
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def check_slug_typos(pages: dict[str, str]) -> list[str]:
+    """Pages whose filename looks like a misspelling of their own title.
+
+    write_wiki_page takes the slug as an argument rather than deriving it, so
+    the model can title a page 'Ollama Thread Wedges' and file it as
+    olloma-thread-wedges.md. Nothing downstream notices: the page is written,
+    the index entry is built from the same wrong slug, and the run exits clean
+    (observed 2026-08-05). The result is a page whose filename contradicts its
+    subject and which no search for the real spelling will find.
+
+    Slug and title legitimately diverge all the time, so the comparison ignores
+    everything that is not a letter or digit — 'Innovator's Dilemma' filing as
+    innovators-dilemma, 'LocalLLMAgent' as local-llm-agent and 'Context Routing
+    Trade-offs' as context-routing-tradeoffs are all differences in separators
+    only, and all reduce to a distance of 0. What is left is a difference
+    *inside* a word, which is what a typo is.
+
+    The threshold is one character, which is narrow on purpose. Over the 312
+    pages this was tuned against, distance 1 flagged exactly the real typo and
+    nothing else; distance 2 additionally flagged hybrid-agent-architecture,
+    titled 'Hybrid AI Agent Architecture', where the shorter slug is a
+    deliberate choice and not a mistake. A two-character typo therefore slips
+    through — the trade is deliberate, since a check that cries wolf on
+    correct pages is one nobody reads.
+    """
+    findings = []
+    for slug, content in sorted(pages.items()):
+        title = _title(content)
+        if not title:
+            continue
+        if _edit_distance(_letters(title), _letters(slug)) == 1:
+            findings.append(
+                f"{slug}.md is titled '# {title}', which spells the name "
+                f"differently — the filename looks like a typo. Rename the "
+                f"page and update the [[{slug}]] link in index.md."
+            )
+    return findings
+
+
 def check_format(vault_path: str, pages: dict[str, str], today: datetime.date) -> list[str]:
     """The page format RULES.md requires — the defect classes a weaker model
     reliably produces: slug-as-title, placeholder and future dates, and
     citations to sources that do not exist."""
+    # Binaries too: list_raw_files deliberately hides them from the *model*,
+    # but a citation's job is to point at a file that exists, and a PDF or
+    # screenshot in raw/ does. Checking against the readable set alone reported
+    # every page citing one as having invented the source — the same class of
+    # false positive _cited_sources was written to kill, through another door.
     raw = set(list_raw_files(vault_path)["files"])
+    raw |= set(list_binary_raw_files(vault_path)["files"])
     findings = []
     for slug, content in sorted(pages.items()):
-        title = next((l[2:].strip() for l in content.splitlines() if l.startswith("# ")), None)
+        title = _title(content)
         if not title:
             findings.append(f"{slug}.md has no '# Title' heading.")
         elif title == slug:
@@ -202,12 +285,23 @@ def check_format(vault_path: str, pages: dict[str, str], today: datetime.date) -
 
         updated = _field(content, "Last updated")
         if updated is not None:
-            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated):
+            # The regex only proves the shape. '2026-13-45' matches it and then
+            # makes fromisoformat raise — which aborted the entire lint run,
+            # report and all, on a page this very check exists to report. An
+            # invented month is exactly what a model that invents dates emits,
+            # so it is reported like any other unusable date rather than raised.
+            parsed = None
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated):
+                try:
+                    parsed = datetime.date.fromisoformat(updated)
+                except ValueError:
+                    pass
+            if parsed is None:
                 findings.append(
                     f"{slug}.md has a non-ISO 'Last updated' ({updated!r}) — "
                     f"use a plain date like {today.isoformat()}."
                 )
-            elif datetime.date.fromisoformat(updated) > today:
+            elif parsed > today:
                 findings.append(
                     f"{slug}.md is dated {updated}, in the future — "
                     f"the model invented a date."
@@ -273,7 +367,7 @@ def check_duplicate_titles(pages: dict[str, str]) -> list[str]:
     under *different* titles need judgment and are left to the --deep pass."""
     by_title: dict[str, list[str]] = {}
     for slug, content in pages.items():
-        title = next((l[2:].strip() for l in content.splitlines() if l.startswith("# ")), None)
+        title = _title(content)
         if title:
             by_title.setdefault(title.lower(), []).append(slug)
     return [
@@ -311,7 +405,7 @@ def _skeleton(slug: str, content: str) -> str:
     template the page was filled in from."""
     body = _UPDATED_LINE.sub("", content)
     body = _LINK.sub("[[·]]", body)
-    title = next((l[2:].strip() for l in content.splitlines() if l.startswith("# ")), "")
+    title = _title(content) or ""
     names = {n for n in (slug, slug.replace("-", " "), title) if n}
     # Longest first, so "model fusion" is blanked before a bare "model" can
     # carve it up into something that no longer matches its twin.
@@ -351,6 +445,7 @@ def structural_findings(
         "Orphan pages": check_orphans(pages),
         "Index integrity": check_index(vault_path, pages),
         "Page format": check_format(vault_path, pages, today),
+        "Misspelled slugs": check_slug_typos(pages),
         "Duplicate titles": check_duplicate_titles(pages),
         "Template twins": check_template_twins(pages),
         "Lens integrity": check_lens_frontmatter(pages),
@@ -399,7 +494,7 @@ def apply_safe_fixes(vault_path: str, pages: dict[str, str]) -> list[str]:
 
     index_path = wiki_dir / "index.md"
     if index_path.is_file():
-        cleaned, n = _delink_broken(index_path.read_text(encoding="utf-8"), set(pages))
+        cleaned, n = delink_broken(index_path.read_text(encoding="utf-8"), set(pages))
         if n:
             index_path.write_text(cleaned, encoding="utf-8")
             changes.append(f"index.md: de-linked {n} dead link{'s' if n > 1 else ''}")
@@ -419,37 +514,10 @@ def _render(findings: dict[str, list[str]]) -> tuple[str, int]:
     return "\n".join(lines), n
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vault", required=True, help="Path to the Obsidian vault.")
-    parser.add_argument(
-        "--deep",
-        action="store_true",
-        help="Also run the model pass for contradictions, duplicate concepts, "
-             "out-of-scope pages and outdated claims.",
-    )
-    parser.add_argument(
-        "--fix",
-        action="store_true",
-        help="Apply the safe, mechanical fixes (strip self-links, de-link dead "
-             "index entries) before reporting. Judgment calls are left alone.",
-    )
-    args = parser.parse_args()
-
-    vault_name = Path(args.vault).name
-    logger = setup_logger(f"wiki_lint.{vault_name}")
-    # setup_logger flushes each record to stdout, while print() is block-buffered
-    # when launchd points stdout at a file — without this the prose report and the
-    # log lines interleave out of order in the launchd log.
-    sys.stdout.reconfigure(line_buffering=True)
-
-    rules_path = Path(args.vault) / "RULES.md"
-    if not rules_path.is_file():
-        print(f"error: {rules_path} not found", file=sys.stderr)
-        return 1
-
-    logger.info(f"Starting wiki lint run for vault: {args.vault}")
-
+def _lint(args, rules_path: Path, logger) -> int:
+    """Run the passes and print the report. Returns the structural finding
+    count. Split out of main() so main() owns the run markers and the one
+    try/except that turns a crash into a phone alert."""
     pages = _pages(args.vault)
     today = datetime.date.today()
 
@@ -491,6 +559,10 @@ def main() -> int:
             "read_wiki_page": functools.partial(read_wiki_page, args.vault),
             "read_index": functools.partial(read_index, args.vault),
         }
+        # The judgment pass is one unit of work for retry-ceiling purposes: 60
+        # iterations x 5 HTTP attempts is up to 300 retries against a provider
+        # that may simply be down, and nothing else here bounds that.
+        budget.start_source("judgment pass", MAX_DEEP_RETRIES)
         # logger= gives the run a tool-call timeline (`tool_call name(args) ->
         # result`), which is the shape LocalLLMAgent's dashboard renders.
         print(run_agent(
@@ -504,13 +576,69 @@ def main() -> int:
             logger=logger,
         ))
 
-    # A run that finds problems still RAN — the nonzero exit is for a human or a
-    # CI check, and the completion marker is what the dashboard reads. Logging
-    # findings as a failure would paint every week red.
     logger.info(
         f"Wiki lint run complete — {len(pages)} pages checked, "
         f"{count} structural finding{'' if count == 1 else 's'}"
     )
+    return count
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--vault", required=True, help="Path to the Obsidian vault.")
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Also run the model pass for contradictions, duplicate concepts, "
+             "out-of-scope pages and outdated claims.",
+    )
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="Apply the safe, mechanical fixes (strip self-links, de-link dead "
+             "index entries) before reporting. Judgment calls are left alone.",
+    )
+    args = parser.parse_args()
+
+    vault_name = Path(args.vault).name
+    logger = setup_logger(f"wiki_lint.{vault_name}")
+    trim_launchd_log(logger)
+    # setup_logger flushes each record to stdout, while print() is block-buffered
+    # when launchd points stdout at a file — without this the prose report and the
+    # log lines interleave out of order in the launchd log.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    rules_path = Path(args.vault) / "RULES.md"
+    if not rules_path.is_file():
+        print(f"error: {rules_path} not found", file=sys.stderr)
+        return 1
+
+    logger.info(f"Starting wiki lint run for vault: {args.vault}")
+
+    # Only --deep talks to a model, and only a model call can hang. The
+    # structural pass is pure Python over local files and consults no budget, so
+    # starting one for it would bound nothing.
+    if args.deep:
+        budget.start_run(DEEP_RUN_BUDGET_MINUTES * 60)
+
+    job = f"wiki_lint[{vault_name}]"
+    try:
+        count = _lint(args, rules_path, logger)
+    except budget.BudgetExceeded as e:
+        logger.error(f"Wiki lint run abandoned: {e}")
+        notify_failure(job, f"abandoned — {e}", logger)
+        return 1
+    except Exception as e:
+        # A weekly unattended audit that dies leaves no trace anyone reads: the
+        # report simply doesn't appear, which looks identical to a clean week.
+        logger.exception(f"Wiki lint run failed: {e}")
+        notify_failure(job, e, logger)
+        return 1
+
+    # A run that finds problems still RAN — the nonzero exit is for a human or a
+    # CI check, and the completion marker is what the dashboard reads. Findings
+    # are deliberately not an alert: a weekly audit result is something you read,
+    # not something that should page you.
     return 1 if count else 0
 
 

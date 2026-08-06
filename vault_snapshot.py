@@ -29,7 +29,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from agent.common import setup_logger
+from agent.common import setup_logger, trim_launchd_log
 from agent.notify import notify_failure
 
 
@@ -104,6 +104,7 @@ def main() -> int:
 
     vault_name = Path(args.vault).name
     logger = setup_logger(f"vault_snapshot.{vault_name}")
+    trim_launchd_log(logger)
 
     # The two markers a run is bounded by. Without them this job's log is a flat
     # stream of one-off lines: readable, but nothing can tell where one nightly
