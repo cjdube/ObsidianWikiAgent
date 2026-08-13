@@ -177,6 +177,57 @@ def test_normalize_does_not_overwrite_an_existing_description(vault):
 # --- update_index: one page, one section ------------------------------------
 
 
+# --- list_index_sections ---------------------------------------------------
+
+
+def test_list_index_sections_returns_headings_only(vault):
+    vault.index(
+        "# Index\n\nSome intro prose.\n\n"
+        "## AI & Agent Development\n\n- [[ollama]] Local models.\n"
+        "- [[colima]] Containers.\n\n"
+        "### A sub-heading that is not a section\n\n"
+        "## Product\n\n- [[prd]] How we write them.\n"
+    )
+    assert wt.list_index_sections(vault.path) == {
+        "sections": ["AI & Agent Development", "Product"]
+    }
+
+
+def test_list_index_sections_omits_unfiled(vault):
+    """Unfiled is computed by _normalize_index and update_index rejects filing
+    into it, so offering it as a destination only buys a round-trip."""
+    vault.index("# Index\n\n## Tools\n\n- [[colima]] x\n\n## Unfiled\n\n- [[stray]] y\n")
+    assert wt.list_index_sections(vault.path) == {"sections": ["Tools"]}
+
+
+def test_list_index_sections_on_a_missing_index(vault):
+    assert wt.list_index_sections(vault.path) == {"sections": []}
+
+
+def test_list_index_sections_agrees_with_section_bounds(vault):
+    """The two must use one rule for what counts as a section — the model picks
+    a name from this list and update_index has to find it."""
+    vault.index("# Index\n\n## Tools\n\n- [[colima]] x\n\n##  Spaced  \n\n- [[y]] z\n")
+    for name in wt.list_index_sections(vault.path)["sections"]:
+        lines = wt.read_index(vault.path)["content"].splitlines()
+        assert wt._section_bounds(lines, name) is not None
+
+
+def test_ingest_schemas_offer_sections_not_the_whole_index():
+    """The token saving only lands if read_index is un-advertised."""
+    names = [t["function"]["name"] for t in wt.INGEST_TOOL_SCHEMAS]
+    assert "list_index_sections" in names
+    assert "read_index" not in names
+    # The read side still gets the full table of contents.
+    assert "read_index" in [t["function"]["name"] for t in wt.QUERY_TOOL_SCHEMAS]
+
+
+def test_query_dispatch_covers_exactly_the_query_schemas(vault):
+    """The pairing wiki_query.py and wiki_lint.py both rely on."""
+    dispatch = wt.query_dispatch(vault.path)
+    assert set(dispatch) == {t["function"]["name"] for t in wt.QUERY_TOOL_SCHEMAS}
+
+
 def test_update_index_files_one_page_under_a_section(vault):
     vault.page("ollama", "# Ollama\n\n**Summary**: runs local models.\n")
     result = wt.update_index(vault.path, "ollama", "Tools")
@@ -319,6 +370,21 @@ def test_move_raw_file_valid(vault):
 def test_move_raw_file_rejects_bad_folder(vault, folder):
     vault.raw("note.txt")
     assert "error" in wt.move_raw_file(vault.path, "note.txt", folder)
+
+
+def test_move_raw_file_refuses_to_overwrite_a_name_already_there(vault):
+    """Path.rename replaces the destination silently on POSIX, and raw/ is the
+    one tree whose contents are never supposed to change."""
+    vault.raw("notes.md", "the copy already filed", subdir="daily-notes")
+    vault.raw("notes.md", "the copy just dropped in")
+
+    result = wt.move_raw_file(vault.path, "notes.md", "daily-notes")
+
+    assert "error" in result
+    assert "already exists" in result["error"]
+    # Both survive: neither the filed copy nor the dropped one is lost.
+    assert (vault.root / "raw" / "daily-notes" / "notes.md").read_text() == "the copy already filed"
+    assert (vault.root / "raw" / "notes.md").read_text() == "the copy just dropped in"
 
 
 def test_move_raw_file_rejects_filename_escape(vault):
@@ -529,3 +595,37 @@ def test_write_wiki_page_rejects_traversal(vault):
     result = wt.write_wiki_page(vault.path, "../../escape", "x")
     assert "error" in result
     assert not (vault.root.parent / "escape.md").exists()
+
+
+# --- reserved names --------------------------------------------------------
+#
+# index.md and log.md live inside wiki/, so _safe_page_path admits them and
+# list_wiki_pages only hides them from view. write_wiki_page opens "w", so
+# either name reaching it discards a file Python is supposed to own.
+
+
+@pytest.mark.parametrize("name", ["index", "index.md", "log", "log.md"])
+def test_write_wiki_page_refuses_reserved_names(vault, name):
+    original = "# Index\n\n## Tools\n\n- [[colima]] A container runtime.\n"
+    vault.index(original)
+    (vault.root / "wiki" / "log.md").write_text("- 2026-08-01: first entry\n")
+    before = {p.name: p.read_text() for p in (vault.root / "wiki").iterdir()}
+
+    result = wt.write_wiki_page(vault.path, name, "# Clobbered\n")
+
+    assert "error" in result
+    assert "write_wiki_page" in result["error"]
+    after = {p.name: p.read_text() for p in (vault.root / "wiki").iterdir()}
+    assert after == before
+
+
+def test_write_wiki_page_reserved_error_names_the_right_tool(vault):
+    """The model is mid-workflow — a bare refusal just gets retried."""
+    assert "update_index" in wt.write_wiki_page(vault.path, "index", "x")["error"]
+    assert "append_log" in wt.write_wiki_page(vault.path, "log", "x")["error"]
+
+
+def test_write_wiki_page_still_allows_ordinary_names(vault):
+    """The guard is two filenames, not a prefix match — 'indexing' is a page."""
+    assert "written" in wt.write_wiki_page(vault.path, "indexing", "# Indexing\n")
+    assert "written" in wt.write_wiki_page(vault.path, "logging", "# Logging\n")

@@ -42,8 +42,9 @@ launchd (per-vault .plist, timed)
           folder per file; no-op for vaults that declare none)
        -> finds raw/ sources not yet in wiki/.ingested.json, OLDEST FIRST
        -> for each: tool-calling loop against Ollama's /api/chat
-          (read_raw_file, list_wiki_pages, read/write_wiki_page, read_index,
-           update_index, append_log) files it into wiki/, unattended
+          (read_raw_file, list_wiki_pages, read/write_wiki_page,
+           list_index_sections, update_index, append_log) files it into
+           wiki/, unattended
        -> marks it ingested, logs everything to logs/wiki_ingest.<vault>.log
 ```
 
@@ -69,6 +70,13 @@ being asked to do Python's. Naming a page and a section is ~15 tokens and
 cannot be truncated into a valid-looking wrong answer. Descriptions come from
 each page's own `**Summary**:` line, so they cannot be fabricated either.
 
+The read side follows: the ingest is offered `list_index_sections`, not
+`read_index`. Filing a page only requires knowing which headings exist — a few
+dozen names — while the index itself is 57 KB on a 336-page vault, about a
+quarter of the default context window, and grows with every page added. Both
+`write_wiki_page` calls on `index.md` and `log.md` are refused outright, so
+neither file can be rewritten by a route that skips these guarantees.
+
 `wiki_query.py --vault <path> "question"` is the read side — manual and
 on-demand only, since a question needs a live human to ask it.
 
@@ -83,6 +91,12 @@ the tool-dispatch step.
 The 6-iteration cap is only the default for callers that don't say otherwise —
 `wiki_ingest.py` raises it to 30 (one source can touch 10–15 pages) and
 `wiki_lint.py --deep` to 60.
+
+`OLLAMA_MODEL` has no fallback: an unset one raises with the fix rather than
+sending a bare family name Ollama can't resolve and retrying the 404 five
+times. Context overflow is silent (Ollama drops the oldest messages), so a run
+whose opening prompt already fills half of `OLLAMA_NUM_CTX` logs a warning
+before it starts accumulating tool results.
 
 ### `agent/wiki_tools.py`
 
@@ -145,11 +159,14 @@ Once a vault is set up and scheduled, this is the actual workflow:
    ```bash
    .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-learnings
    ```
-3. **Check what it did.** `<vault>/wiki/log.md` is the agent's own
-   append-only account of what it read, what it changed, and any judgment
-   calls it made (it runs unattended, so it never stops to ask).
-   `logs/wiki_ingest.<vault-name>.log` has the full structured run log if
-   something needs debugging. A source is only marked done once it actually
+3. **Check what it did.** `<vault>/wiki/log.md` is the agent's own account of
+   what it read, what it changed, and any judgment calls it made (it runs
+   unattended, so it never stops to ask). Read it as a summary, not as
+   evidence: the model writes it, so it is only as reliable as the run that
+   produced it. `logs/wiki_ingest.<vault-name>.log` is the record Python
+   writes — one line per tool call, with its arguments and result — and it is
+   what to read when a run's behaviour is actually in question. A source is
+   only marked done once it actually
    writes pages; if the local model reads a file but returns without writing
    (a transient no-op that happens on dense sources), the run re-attempts it
    a few times, then leaves it for the next scheduled run — so a stuck file
@@ -338,12 +355,14 @@ non-zero. Delivery is best-effort and never masks the failure it reports.
 
 ## Running the tests
 
-Deterministic unit tests cover the file I/O and path safety in
-`agent/wiki_tools.py`, every structural check in `wiki_lint.py`, the agent
-loop's dispatch/retry plumbing in `agent/loop.py`, and the run budget and
-failure alerting in `agent/budget.py`, `wiki_ingest.py`, `wiki_lint.py` and
-`vault_snapshot.py`. The LLM HTTP layer is mocked, so no Ollama or Gemini is
-needed and nothing hits the network.
+Deterministic unit tests cover the file I/O, path safety and reserved-name
+guards in `agent/wiki_tools.py`, every structural check in `wiki_lint.py`, the
+agent loop's dispatch/retry/provider plumbing in `agent/loop.py`, the raw-file
+sort step in `wiki_ingest.py`, and the run budget and failure alerting in
+`agent/budget.py`, `wiki_ingest.py`, `wiki_lint.py` and `vault_snapshot.py`.
+The LLM HTTP layer is mocked, so no Ollama or Gemini is needed and nothing hits
+the network — and the suite pins its own model settings, so it does not depend
+on whether you have a `config/.env`.
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt

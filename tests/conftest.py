@@ -79,6 +79,22 @@ def _isolate_logs(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_model_env(monkeypatch):
+    """Pin the model settings the loop reads, so the suite does not depend on
+    whether the developer happens to have a config/.env.
+
+    agent/__init__.py loads that file on import, so before this fixture the
+    suite passed here and would have failed on a clean checkout the moment
+    _ollama_model stopped defaulting to a hardcoded tag. Tests that care about
+    a specific value still monkeypatch over these.
+    """
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _clear_budget():
     """agent/budget.py holds the run's deadline and retry ceiling in module
     state, so a test that starts one would otherwise leak it into the next."""

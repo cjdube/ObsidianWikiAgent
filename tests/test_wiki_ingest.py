@@ -48,6 +48,33 @@ def _writes(**kwargs):
 # --- budget stops the run --------------------------------------------------
 
 
+def test_ingest_dispatch_covers_every_advertised_tool(vault):
+    """A schema with no dispatch entry is an unknown-tool error mid-run, which
+    costs a loop iteration and confuses the model. read_index is the deliberate
+    other way round — dispatchable but unadvertised, so a RULES.md that names
+    the index in prose still works."""
+    from agent.wiki_tools import INGEST_TOOL_SCHEMAS
+
+    dispatch = wiki_ingest._build_dispatch(vault.path, wiki_ingest._WriteCounter())
+    advertised = {t["function"]["name"] for t in INGEST_TOOL_SCHEMAS}
+
+    assert advertised <= set(dispatch)
+    assert set(dispatch) - advertised == {"read_index"}
+
+
+def test_write_counter_ignores_a_refused_write(vault):
+    """A refused reserved name comes back as an error result. Counting it as
+    progress would mark a source ingested on a call that wrote nothing."""
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._build_dispatch(vault.path, writes)
+
+    assert "error" in dispatch["write_wiki_page"](name="index", content="x")
+    assert not writes
+
+    assert "written" in dispatch["write_wiki_page"](name="real", content="# Real\n")
+    assert writes
+
+
 def test_budget_exhaustion_propagates_out_of_ingest_vault(vault):
     vault.raw("one.md", subdir="daily-notes")
     budget.start_run(-1)

@@ -28,6 +28,7 @@ from agent.wiki_tools import (
     append_log,
     get_ingested_sources,
     list_binary_raw_files,
+    list_index_sections,
     list_raw_files,
     list_unsorted_raw_files,
     list_wiki_pages,
@@ -92,17 +93,29 @@ leave a source partially processed and waiting for input.
 Do not ask any questions. Do not wait for confirmation."""
 
 
-def _build_dispatch(vault_path: str, write_counter: list) -> dict:
-    """write_counter is a single-element list used as a mutable int — appended
-    to whenever a tool that actually changes the wiki gets called, so the
-    caller can tell a real ingest from a run that silently did nothing."""
+class _WriteCounter:
+    """Counts the tool calls that actually change the wiki, so the caller can
+    tell a real ingest from a run that read a source and silently did nothing."""
 
+    def __init__(self):
+        self.count = 0
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+
+def _build_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
     def _tracked_write_wiki_page(**kwargs):
-        write_counter.append(1)
-        return write_wiki_page(vault_path, **kwargs)
+        result = write_wiki_page(vault_path, **kwargs)
+        # Only a write that landed counts. A refused reserved name comes back
+        # as an error result, and treating that as progress would mark a source
+        # ingested on the strength of a call that wrote nothing.
+        if "error" not in result:
+            writes.count += 1
+        return result
 
     def _tracked_append_log(**kwargs):
-        write_counter.append(1)
+        writes.count += 1
         return append_log(vault_path, **kwargs)
 
     return {
@@ -110,6 +123,11 @@ def _build_dispatch(vault_path: str, write_counter: list) -> dict:
         "list_wiki_pages": functools.partial(list_wiki_pages, vault_path),
         "read_wiki_page": functools.partial(read_wiki_page, vault_path),
         "write_wiki_page": _tracked_write_wiki_page,
+        "list_index_sections": functools.partial(list_index_sections, vault_path),
+        # Not in INGEST_TOOL_SCHEMAS any more (list_index_sections replaced it),
+        # but still dispatchable: a vault's RULES.md is the system prompt and
+        # may say "read wiki/index.md" in prose, and that call should work
+        # rather than come back as an unknown tool.
         "read_index": functools.partial(read_index, vault_path),
         "update_index": functools.partial(update_index, vault_path),
         "append_log": _tracked_append_log,
@@ -224,8 +242,8 @@ def _ingest_source(vault_path: str, filename: str, system_prompt: str, logger) -
         # pages and appended to log.md before dying will, on retry,
         # re-append: append_log is the one non-idempotent tool. The cost
         # is a duplicate ledger entry, not lost or corrupted pages.
-        write_counter: list = []
-        dispatch = _build_dispatch(vault_path, write_counter)
+        writes = _WriteCounter()
+        dispatch = _build_dispatch(vault_path, writes)
         try:
             result = run_agent(
                 system_prompt=system_prompt,
@@ -257,7 +275,7 @@ def _ingest_source(vault_path: str, filename: str, system_prompt: str, logger) -
             )
             continue
 
-        if write_counter:
+        if writes:
             return True
         logger.warning(
             f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' produced "
@@ -280,9 +298,14 @@ def ingest_vault(vault_path: str, logger) -> int:
     # raw/ was put there to be read, so say so rather than ignoring it in
     # silence — the fix is OCR or a vision model, and only a human can decide
     # that's worth doing.
+    # INFO, not WARNING. A binary in raw/ is a standing condition — nothing
+    # here removes it — so a warning would fire on every scheduled run forever,
+    # and LocalLLMAgent's log_inspector reports every WARNING it finds. That is
+    # the same reasoning wiki_lint applies to its own findings: something you
+    # read, not something that should page you.
     binaries = list_binary_raw_files(vault_path).get("files", [])
     if binaries:
-        logger.warning(
+        logger.info(
             f"Skipping {len(binaries)} binary source(s) in raw/ — these need OCR "
             f"or a vision model, not a text read: {', '.join(binaries)}"
         )

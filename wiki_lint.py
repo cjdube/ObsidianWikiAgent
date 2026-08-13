@@ -11,9 +11,9 @@ Two passes, split by what each is actually good at:
 
   Structural checks run in Python. Link integrity, orphans, index
   completeness and page format are exact, enumerable facts over every page.
-  Asking a model to enumerate 81 pages correctly is what produced the orphaned
-  index in the first place (see update_index in agent/wiki_tools.py), so these
-  run as code: instant, free, and they cannot miss one.
+  Asking a model to enumerate every page correctly is what produced the
+  orphaned index in the first place (see update_index in agent/wiki_tools.py),
+  so these run as code: instant, free, and they cannot miss one.
 
   --deep adds a model pass for the checks code cannot do: contradictions
   between pages, two pages covering one concept under different names, pages
@@ -36,7 +36,6 @@ Usage:
 
 import argparse
 import datetime
-import functools
 import re
 import sys
 from pathlib import Path
@@ -52,11 +51,9 @@ from agent.wiki_tools import (
     list_binary_raw_files,
     list_raw_files,
     list_wiki_pages,
+    query_dispatch,
     read_index,
-    read_wiki_page,
 )
-
-RESERVED = ("index.md", "log.md")
 
 # Bounds for the --deep pass only. This is a scheduled unattended job against a
 # provider that can be slow or down, and 60 iterations x 5 HTTP attempts is the
@@ -554,11 +551,7 @@ def _lint(args, rules_path: Path, logger) -> int:
     if args.deep:
         print("\n---\n\n## Judgment pass\n")
         context = report if count else "The structural pass found no problems."
-        dispatch = {
-            "list_wiki_pages": functools.partial(list_wiki_pages, args.vault),
-            "read_wiki_page": functools.partial(read_wiki_page, args.vault),
-            "read_index": functools.partial(read_index, args.vault),
-        }
+        dispatch = query_dispatch(args.vault)
         # The judgment pass is one unit of work for retry-ceiling purposes: 60
         # iterations x 5 HTTP attempts is up to 300 retries against a provider
         # that may simply be down, and nothing else here bounds that.

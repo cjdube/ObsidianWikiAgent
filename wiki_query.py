@@ -10,12 +10,11 @@ Usage:
 """
 
 import argparse
-import functools
 import sys
 from pathlib import Path
 
 from agent.loop import run_agent
-from agent.wiki_tools import QUERY_TOOL_SCHEMAS, list_wiki_pages, read_index, read_wiki_page
+from agent.wiki_tools import QUERY_TOOL_SCHEMAS, query_dispatch
 
 ANSWER_WRAPPER = """
 
@@ -38,17 +37,11 @@ def main() -> int:
         return 1
     rules = rules_path.read_text(encoding="utf-8")
 
-    dispatch = {
-        "list_wiki_pages": functools.partial(list_wiki_pages, args.vault),
-        "read_wiki_page": functools.partial(read_wiki_page, args.vault),
-        "read_index": functools.partial(read_index, args.vault),
-    }
-
     answer = run_agent(
         system_prompt=rules + ANSWER_WRAPPER,
         user_prompt=args.question,
         tools=QUERY_TOOL_SCHEMAS,
-        dispatch=dispatch,
+        dispatch=query_dispatch(args.vault),
     )
     print(answer)
     return 0

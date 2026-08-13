@@ -23,14 +23,9 @@ non-zero.
 
 import logging
 import os
-from pathlib import Path
 from typing import Optional
 
 import requests
-from dotenv import load_dotenv
-
-_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_ROOT / "config" / ".env")
 
 _TIMEOUT_S = 10
 _MAX_MESSAGE_CHARS = 500

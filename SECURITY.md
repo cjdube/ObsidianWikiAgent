@@ -48,12 +48,31 @@ against `.resolve()`d paths, a symlink pointing out of the vault is caught by
 the same check. The seven exposed tools are all vault file I/O — no shell, no
 network, and no path argument that bypasses those two guards.
 
+`write_wiki_page` additionally refuses the two filenames Python owns,
+`index.md` and `log.md` (`RESERVED` in `agent/wiki_tools.py`). Both sit inside
+`wiki/`, so the path guards admit them; without the name check that tool was a
+way to truncate the table of contents that `update_index` exists to protect, or
+the operation log below.
+
 What does **not** contain it: nothing stops a model from being argued into
 writing wrong or attacker-chosen *content* at a legitimate path inside the
 vault, including overwriting a page you trust. The blast radius is the vault's
 contents, and that is the guarantee — file the untrusted material in a vault
-you don't treat as authoritative, and read `wiki/log.md`, which is the agent's
-own account of what it changed and why.
+you don't treat as authoritative.
+
+### Which record to trust afterwards
+
+`wiki/log.md` is written by the model, from the text it passes to `append_log`.
+It is a useful narrative of what a run thought it was doing, but it is **not
+evidence**: a source written to manipulate the model is also, by the same
+means, writing that account of itself.
+
+The record outside the model's reach is the structured log,
+`logs/wiki_ingest.<vault>.log`. Python writes one line per dispatch — `tool_call
+<name>(<args>) -> <result>` — from the actual call, before the model sees the
+outcome and with no tool that can edit it. If a run's behaviour is in question,
+that is the file to read. Note it therefore contains verbatim source and page
+content, which is why `logs/*.log*` is gitignored.
 
 Binaries in `raw/` are refused rather than decoded, for a related reason
 documented at `_is_text_source`: a PNG decoded with `errors="replace"` yields

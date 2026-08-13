@@ -22,11 +22,19 @@ Usage:
 """
 
 import argparse
+import functools
 import glob
 import json
 import re
 import sys
 from pathlib import Path
+
+
+# The two files in wiki/ that Python owns rather than the model. Both are
+# reachable by name through write_wiki_page — _safe_page_path only checks the
+# path stays inside wiki/, and these are inside it — so naming them here is
+# what keeps them out of that tool's reach. See write_wiki_page.
+RESERVED = ("index.md", "log.md")
 
 
 def _raw_dir(vault_path: str) -> Path:
@@ -186,7 +194,16 @@ def list_unsorted_raw_files(vault_path: str) -> dict:
 def move_raw_file(vault_path: str, filename: str, folder: str) -> dict:
     """Move raw/<filename> into the raw/<folder>/ subdirectory, creating it if
     needed. Rejects any folder that isn't a plain subdirectory name inside
-    raw/ (no path separators, no escaping via '..')."""
+    raw/ (no path separators, no escaping via '..'), and refuses to land on a
+    name already taken in the destination.
+
+    That last guard matters because Path.rename replaces an existing
+    destination silently on POSIX, and raw/ is the one tree whose contents are
+    never supposed to change (see the module docstring). Duplicate basenames
+    are not hypothetical: list_raw_files exists partly to reconcile "a name
+    appearing in two directories". A collision leaves the file where it is and
+    reports why — sort_raw_files logs that and moves on, which is the right
+    outcome for something only a human can untangle."""
     if "/" in folder or "\\" in folder or folder in ("", ".", ".."):
         return {"error": f"invalid destination folder '{folder}'"}
     raw_dir = _raw_dir(vault_path).resolve()
@@ -201,6 +218,11 @@ def move_raw_file(vault_path: str, filename: str, folder: str) -> dict:
         return {"error": f"destination '{folder}' resolves outside raw/"}
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / src.name
+    if dest.exists():
+        return {
+            "error": f"'{src.name}' already exists in {folder}/ — "
+                     f"leaving it in raw/ rather than overwriting."
+        }
     src.rename(dest)
     return {"moved": f"{folder}/{src.name}"}
 
@@ -248,7 +270,7 @@ def list_wiki_pages(vault_path: str) -> dict:
         if p.is_file()
         and p.suffix == ".md"
         and not p.name.startswith(".")
-        and p.name not in ("index.md", "log.md")
+        and p.name not in RESERVED
     )
     return {"pages": pages}
 
@@ -286,11 +308,30 @@ def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
     parts of a file it cannot see the purpose of, and a guarantee belongs in
     code. Content that *does* carry frontmatter is written through untouched,
     so this restores what was dropped without making frontmatter immutable.
+
+    index.md and log.md are refused (see RESERVED). Both live inside wiki/, so
+    _safe_page_path admits them, and list_wiki_pages hiding them only means the
+    model is never *shown* them — nothing stopped it naming one. That left this
+    tool as a way around the two guarantees the rest of the module exists to
+    provide: update_index owns index.md precisely so a whole-document rewrite
+    can't truncate it (the 2026-08-04 stub that stripped 91 descriptions), and
+    append_log opens log.md in append mode so the operation history only ever
+    grows. This function opens "w", so either name reaching it discards the
+    file. The index would partly rebuild itself on the next update_index call;
+    the log would not come back at all.
     """
     try:
         path = _safe_page_path(vault_path, name)
     except ValueError as e:
         return {"error": str(e)}
+    if path.name in RESERVED:
+        # Named tools, not just a refusal: the model is mid-workflow and needs
+        # to know where to put this, or it will retry the same call.
+        tool = "update_index" if path.name == "index.md" else "append_log"
+        return {
+            "error": f"'{path.name}' is not writable with write_wiki_page — "
+                     f"use {tool} instead."
+        }
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file() and not content.startswith("---"):
         block = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
@@ -308,6 +349,41 @@ def read_index(vault_path: str) -> dict:
 
 
 UNFILED_HEADING = "## Unfiled"
+
+
+def _section_title(line: str) -> str | None:
+    """The heading text of a `## Section` line, or None for anything else."""
+    if not line.startswith("## "):
+        return None
+    return line[3:].strip()
+
+
+def list_index_sections(vault_path: str) -> dict:
+    """The section headings in wiki/index.md — the whole of what a caller needs
+    in order to decide where a page goes.
+
+    read_index returns the entire table of contents, which on a 336-page vault
+    is 57 KB: roughly 14k tokens, a quarter of the default context window, and
+    growing linearly with the vault. Nearly all of it is entry lines the model
+    has no use for. update_index takes a page and a section, so the only
+    question left to answer is which heading, and there are a few dozen of
+    those.
+
+    This is update_index's own trade applied to the read side: the model names
+    a destination, Python owns the document. Naming one of forty headings
+    cannot be truncated into a valid-looking wrong answer either.
+
+    'Unfiled' is omitted — it is computed by _normalize_index and update_index
+    rejects filing into it, so offering it as a destination only buys a
+    round-trip.
+    """
+    unfiled = UNFILED_HEADING[3:].casefold()
+    sections = []
+    for line in read_index(vault_path)["content"].splitlines():
+        title = _section_title(line)
+        if title and title.casefold() != unfiled:
+            sections.append(title)
+    return {"sections": sections}
 
 
 def linked_page_names(content: str) -> set[str]:
@@ -502,9 +578,10 @@ def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
     """(heading index, end index) of `## section`, or None if it isn't there."""
     want = section.strip().lstrip("#").strip().casefold()
     for i, line in enumerate(lines):
-        if line.startswith("## ") and line[3:].strip().casefold() == want:
+        title = _section_title(line)
+        if title is not None and title.casefold() == want:
             for j in range(i + 1, len(lines)):
-                if lines[j].startswith("## "):
+                if _section_title(lines[j]) is not None:
                     return i, j
             return i, len(lines)
     return None
@@ -664,6 +741,15 @@ READ_INDEX_SCHEMA = {
     },
 }
 
+LIST_INDEX_SECTIONS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "list_index_sections",
+        "description": "List the section headings in wiki/index.md. This is what you need to choose the 'section' argument for update_index — use it instead of reading the whole index, which is large and mostly entries you do not need.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
 UPDATE_INDEX_SCHEMA = {
     "type": "function",
     "function": {
@@ -673,7 +759,7 @@ UPDATE_INDEX_SCHEMA = {
             "type": "object",
             "properties": {
                 "page": {"type": "string", "description": "Page name, e.g. 'ollama' (no .md)."},
-                "section": {"type": "string", "description": "Section heading it belongs under, e.g. 'AI & Agent Development'. Use an existing heading from the index where one fits; a new one is created if not."},
+                "section": {"type": "string", "description": "Section heading it belongs under, e.g. 'AI & Agent Development'. Call list_index_sections to see the existing headings and use one where it fits; a new one is created if not."},
             },
             "required": ["page", "section"],
         },
@@ -695,21 +781,45 @@ APPEND_LOG_SCHEMA = {
     },
 }
 
+# read_index is deliberately absent: an ingest's two uses for the index are
+# "what already exists" (list_wiki_pages, a tenth the size) and "which section"
+# (list_index_sections, a hundredth), and offering the 57 KB version invites the
+# model to spend a quarter of its context on it. It stays in the ingest dispatch
+# though — a vault's RULES.md is the system prompt and may well say "read
+# wiki/index.md" in prose, and a call that arrives anyway should work rather
+# than come back as an unknown-tool error.
 INGEST_TOOL_SCHEMAS = [
     READ_RAW_FILE_SCHEMA,
     LIST_WIKI_PAGES_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     WRITE_WIKI_PAGE_SCHEMA,
-    READ_INDEX_SCHEMA,
+    LIST_INDEX_SECTIONS_SCHEMA,
     UPDATE_INDEX_SCHEMA,
     APPEND_LOG_SCHEMA,
 ]
 
+# The read side keeps read_index: wiki_query.py and the lint judgment pass are
+# answering questions about the wiki as a whole, which is what a table of
+# contents is for, and neither runs in a loop that accumulates page after page.
 QUERY_TOOL_SCHEMAS = [
     LIST_WIKI_PAGES_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     READ_INDEX_SCHEMA,
 ]
+
+
+def query_dispatch(vault_path: str) -> dict:
+    """The {name: callable} map for QUERY_TOOL_SCHEMAS, bound to one vault.
+
+    Lives beside the schema list so the two cannot drift — wiki_query.py and
+    wiki_lint.py's judgment pass need exactly this set, and each used to build
+    it by hand.
+    """
+    return {
+        "list_wiki_pages": functools.partial(list_wiki_pages, vault_path),
+        "read_wiki_page": functools.partial(read_wiki_page, vault_path),
+        "read_index": functools.partial(read_index, vault_path),
+    }
 
 
 def main() -> int:

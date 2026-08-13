@@ -19,16 +19,11 @@ import logging
 import os
 import random
 import time
-from pathlib import Path
 from typing import Callable, Optional
 
 import requests
-from dotenv import load_dotenv
 
 from agent import budget
-
-_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(_ROOT / "config" / ".env")
 
 MAX_TOOL_ITERATIONS = 6
 
@@ -43,7 +38,47 @@ _MAX_HTTP_ATTEMPTS = 5
 
 
 def _provider(explicit: Optional[str] = None) -> str:
-    return (explicit or os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+    name = (explicit or os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
+    if name not in ("ollama", "gemini"):
+        # Checked in one place so complete_text and run_agent agree. They used
+        # to differ: run_agent raised, while complete_text fell through to its
+        # Ollama branch, so a typo in LLM_PROVIDER ran the ingest's sort step
+        # locally and then failed on the first source with an unrelated-looking
+        # error.
+        raise ValueError(f"unknown provider '{name}' (expected 'ollama' or 'gemini')")
+    return name
+
+
+def _ollama_model(explicit: Optional[str] = None) -> str:
+    """The Ollama tag to call, or a message saying how to set one.
+
+    No default. The obvious one — a bare family name like 'gemma4' — is not a
+    tag Ollama resolves, so it buys nothing but a 404 five times over with
+    backoff, several minutes after the run started and with no mention of
+    config/.env in the error. The Gemini path already raises with a remedy
+    (see _gemini_key); this matches it.
+    """
+    model = explicit or os.getenv("OLLAMA_MODEL")
+    if not model:
+        raise RuntimeError(
+            "OLLAMA_MODEL is not set — add the exact tag `ollama list` prints "
+            "to config/.env (e.g. OLLAMA_MODEL=gemma4:26b-mlx). A bare family "
+            "name is not a tag Ollama resolves."
+        )
+    return model
+
+
+def _incomplete(max_iterations: int, logger: Optional[logging.Logger]) -> str:
+    """The both-providers answer when the loop runs out of iterations."""
+    if logger:
+        logger.warning(
+            f"agent loop exceeded max_iterations={max_iterations} without a "
+            "final answer — returning best-effort partial result"
+        )
+    return (
+        f"[incomplete: hit max_iterations={max_iterations} tool calls without "
+        "reaching a final answer]"
+    )
 
 
 def _dispatch_tool(
@@ -165,11 +200,9 @@ def run_agent(
         return _run_gemini(
             system_prompt, user_prompt, tools, dispatch, model, logger, max_iterations
         )
-    if name == "ollama":
-        return _run_ollama(
-            system_prompt, user_prompt, tools, dispatch, model, host, logger, max_iterations
-        )
-    raise ValueError(f"unknown provider '{name}' (expected 'ollama' or 'gemini')")
+    return _run_ollama(
+        system_prompt, user_prompt, tools, dispatch, model, host, logger, max_iterations
+    )
 
 
 def _ollama_options() -> dict:
@@ -188,6 +221,41 @@ def _ollama_options() -> dict:
     return {"num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "32768"))}
 
 
+# Rough bytes-per-token for prose and markdown. Only ever decides whether to
+# log a warning, so being 20% out costs nothing.
+_CHARS_PER_TOKEN = 4
+
+
+def _warn_if_context_is_tight(
+    system_prompt: str,
+    user_prompt: str,
+    num_ctx: int,
+    logger: Optional[logging.Logger],
+) -> None:
+    """Say something when the opening prompt already fills much of the window.
+
+    The overflow itself is silent by design (see _ollama_options), and that is
+    the whole problem: Ollama drops the oldest messages, so a vault's RULES.md
+    leaves the conversation first and the model finishes the run answering from
+    a truncated view with nothing in any log to say so.
+
+    Measured before any tool result is appended, because that is the part of a
+    run that cannot shrink. An ingest then adds the source, every page it reads
+    and every page it writes — so a start that already fills half the window
+    will not fit, and the half is a deliberately early alarm rather than a
+    prediction.
+    """
+    if logger is None:
+        return
+    estimate = (len(system_prompt) + len(user_prompt)) // _CHARS_PER_TOKEN
+    if estimate * 2 > num_ctx:
+        logger.warning(
+            f"Prompt is ~{estimate} tokens before any tool results, against "
+            f"num_ctx={num_ctx}. Ollama drops the oldest messages on overflow "
+            f"rather than failing — raise OLLAMA_NUM_CTX in config/.env."
+        )
+
+
 def _run_ollama(
     system_prompt: str,
     user_prompt: str,
@@ -198,9 +266,11 @@ def _run_ollama(
     logger: Optional[logging.Logger],
     max_iterations: int,
 ) -> str:
-    model = model or os.getenv("OLLAMA_MODEL", "gemma4")
+    model = _ollama_model(model)
     host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
     timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+    options = _ollama_options()
+    _warn_if_context_is_tight(system_prompt, user_prompt, options["num_ctx"], logger)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -215,7 +285,7 @@ def _run_ollama(
                 "messages": messages,
                 "tools": tools,
                 "stream": False,
-                "options": _ollama_options(),
+                "options": options,
             },
             timeout=timeout,
             logger=logger,
@@ -232,17 +302,16 @@ def _run_ollama(
             fn_name = call["function"]["name"]
             fn_args = call["function"].get("arguments", {})
             result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
-            messages.append({"role": "tool", "content": json.dumps(result)})
+            # tool_name matters once a turn carries several calls: without it
+            # the model gets an ordered list of unlabelled results and has to
+            # infer which is which. The Gemini path has always named them.
+            messages.append({
+                "role": "tool",
+                "tool_name": fn_name,
+                "content": json.dumps(result),
+            })
 
-    if logger:
-        logger.warning(
-            f"agent loop exceeded max_iterations={max_iterations} without a "
-            "final answer — returning best-effort partial result"
-        )
-    return (
-        f"[incomplete: hit max_iterations={max_iterations} tool calls without "
-        "reaching a final answer]"
-    )
+    return _incomplete(max_iterations, logger)
 
 
 def _gemini_key() -> str:
@@ -253,6 +322,16 @@ def _gemini_key() -> str:
             "LLM_PROVIDER=gemini."
         )
     return key
+
+
+def _gemini_model(explicit: Optional[str] = None) -> str:
+    model = explicit or os.getenv("GEMINI_MODEL")
+    if not model:
+        raise RuntimeError(
+            "GEMINI_MODEL is not set — add it to config/.env (see "
+            "`python -m agent.loop list-models` for what your key can reach)."
+        )
+    return model
 
 
 def _to_function_declarations(tools: list[dict]) -> list[dict]:
@@ -282,12 +361,7 @@ def _run_gemini(
     logger: Optional[logging.Logger],
     max_iterations: int,
 ) -> str:
-    model = model or os.getenv("GEMINI_MODEL")
-    if not model:
-        raise RuntimeError(
-            "GEMINI_MODEL is not set — add it to config/.env (see "
-            "`python -m agent.loop list-models` for what your key can reach)."
-        )
+    model = _gemini_model(model)
 
     url = f"{GEMINI_ENDPOINT}/models/{model}:generateContent"
     headers = {"x-goog-api-key": _gemini_key()}
@@ -328,15 +402,7 @@ def _run_gemini(
             )
         contents.append({"role": "user", "parts": responses})
 
-    if logger:
-        logger.warning(
-            f"agent loop exceeded max_iterations={max_iterations} without a "
-            "final answer — returning best-effort partial result"
-        )
-    return (
-        f"[incomplete: hit max_iterations={max_iterations} tool calls without "
-        "reaching a final answer]"
-    )
+    return _incomplete(max_iterations, logger)
 
 
 def complete_text(
@@ -352,7 +418,9 @@ def complete_text(
     name = _provider(provider)
 
     if name == "gemini":
-        model = model or os.getenv("GEMINI_MODEL")
+        # Same validation _run_gemini does. Skipping it here built a URL of
+        # 'models/None:generateContent' and returned an opaque 404.
+        model = _gemini_model(model)
         resp = _post_with_retry(
             f"{GEMINI_ENDPOINT}/models/{model}:generateContent",
             {
@@ -367,7 +435,7 @@ def complete_text(
         parts = (candidates[0].get("content") or {}).get("parts") or []
         return "".join(p.get("text", "") for p in parts).strip()
 
-    model = model or os.getenv("OLLAMA_MODEL", "gemma4")
+    model = _ollama_model(model)
     host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
     resp = _post_with_retry(
         f"{host}/api/chat",
