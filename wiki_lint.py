@@ -29,9 +29,9 @@ this repo's launchd jobs (see its docs/external-tasks.md). Findings log at INFO,
 never WARNING: they're a weekly read, not an alert.
 
 Usage:
-    python wiki_lint.py --vault ~/Documents/llm-wiki-learnings
-    python wiki_lint.py --vault ~/Documents/llm-wiki-learnings --deep
-    python wiki_lint.py --vault ~/Documents/llm-wiki-learnings --fix
+    python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings
+    python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --deep
+    python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --fix
 """
 
 import argparse

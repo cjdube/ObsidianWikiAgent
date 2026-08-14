@@ -9,7 +9,7 @@ Vault-agnostic: this script has no idea what subject any given vault covers.
 Adding a new vault means a new folder with its own RULES.md, not new code.
 
 Usage:
-    python wiki_ingest.py --vault ~/Documents/llm-wiki-learnings
+    python wiki_ingest.py --vault ~/Vaults/llm-wiki-learnings
 """
 
 import argparse

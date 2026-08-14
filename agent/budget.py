@@ -20,6 +20,16 @@ model call. agent/loop.py consults them from inside its own retry loop, which
 is where the hours were actually spent; a check that only ran between sources
 would not have stopped that morning's run any sooner.
 
+The deadline is enforced twice over: by every check() below, and by a one-shot
+SIGALRM timer armed alongside it. The checks are cooperative, so they can only
+fire where this code thought to ask — and on 2026-08-13 the entire 433 minutes
+of a 45-minute run were spent inside a single blocking read(), before the first
+checkpoint, while macOS held up a Documents-folder consent prompt that nobody
+was there to answer. The run held the Ollama slot for seven hours and then
+reported "budget exhausted before sorting X", naming the step that had never
+got to run. A signal interrupts the syscall, so the timer reaches where the
+checks cannot.
+
 With no budget started every check is a no-op, so interactive runs and the test
 suite are unaffected. wiki_lint starts one for its --deep pass only: that pass
 is a scheduled unattended model conversation and has the same unbounded
@@ -28,6 +38,7 @@ consults nothing here.
 """
 
 import math
+import signal
 import time
 
 
@@ -45,10 +56,38 @@ _source: str | None = None
 _retries_left: int | None = None
 
 
+def _arm_watchdog(seconds: float) -> None:
+    """Schedule the hard deadline. One-shot: it fires once, and the run is over.
+
+    Off the main thread signal.signal raises, and there is nothing to do about
+    that — the cooperative checks are then all a caller gets.
+    """
+    def fire(signum, frame):
+        raise BudgetExceeded(
+            f"run budget of {seconds / 60:g} min expired with the process "
+            "blocked outside any checkpoint"
+        )
+
+    try:
+        signal.signal(signal.SIGALRM, fire)
+    except ValueError:
+        return
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
+def _disarm_watchdog() -> None:
+    signal.setitimer(signal.ITIMER_REAL, 0)
+
+
 def start_run(seconds: float) -> None:
     """Begin the wall-clock budget for this process."""
     global _deadline
     _deadline = time.monotonic() + seconds
+    # A budget that is already spent needs no timer — the next check() raises.
+    # Arming one would be worse than useless: setitimer reads 0 as "disarm", so
+    # the one case that most needs stopping would be the one left unwatched.
+    if seconds > 0:
+        _arm_watchdog(seconds)
 
 
 def start_source(name: str, max_retries: int) -> None:
@@ -64,6 +103,7 @@ def start_source(name: str, max_retries: int) -> None:
 def reset() -> None:
     """Clear all budget state (used by the test suite between tests)."""
     global _deadline, _source, _retries_left
+    _disarm_watchdog()
     _deadline = None
     _source = None
     _retries_left = None

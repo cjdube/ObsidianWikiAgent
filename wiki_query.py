@@ -6,7 +6,7 @@ vault's own RULES.md for its Q&A conventions and answers with page
 citations, using only the read-only wiki tools.
 
 Usage:
-    python wiki_query.py --vault ~/Documents/llm-wiki-learnings "What have we learned about scoping agent tool schemas?"
+    python wiki_query.py --vault ~/Vaults/llm-wiki-learnings "What have we learned about scoping agent tool schemas?"
 """
 
 import argparse

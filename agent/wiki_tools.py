@@ -17,8 +17,8 @@ Vault layout expected:
     <vault>/wiki/.ingested.json -- list of raw filenames already processed
 
 Usage:
-    python -m agent.wiki_tools list-raw --vault ~/Documents/llm-wiki-learnings
-    python -m agent.wiki_tools list-wiki --vault ~/Documents/llm-wiki-learnings
+    python -m agent.wiki_tools list-raw --vault ~/Vaults/llm-wiki-learnings
+    python -m agent.wiki_tools list-wiki --vault ~/Vaults/llm-wiki-learnings
 """
 
 import argparse

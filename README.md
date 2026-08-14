@@ -110,8 +110,8 @@ quickest way to check the ingest queue's order or spot a page the model filed
 under a name you didn't expect:
 
 ```bash
-.venv/bin/python -m agent.wiki_tools list-raw --vault ~/Documents/llm-wiki-learnings
-.venv/bin/python -m agent.wiki_tools list-wiki --vault ~/Documents/llm-wiki-learnings
+.venv/bin/python -m agent.wiki_tools list-raw --vault ~/Vaults/llm-wiki-learnings
+.venv/bin/python -m agent.wiki_tools list-wiki --vault ~/Vaults/llm-wiki-learnings
 ```
 
 ## Setup (from scratch)
@@ -135,10 +135,15 @@ under a name you didn't expect:
    <vault>/raw/       -- source documents
    <vault>/wiki/       -- maintained pages (index.md, log.md created on first run)
    ```
+   Keep the vault out of `~/Documents`, `~/Desktop` and `~/Downloads`. macOS
+   gates those behind a consent prompt keyed to the interpreter's exact path,
+   so a `brew upgrade python@3.12` silently revokes it — and the next scheduled
+   run then blocks on a dialog nobody is there to answer. That cost one run
+   seven hours on 2026-08-13.
 5. Test manually before scheduling:
    ```bash
-   .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-learnings
-   .venv/bin/python wiki_query.py --vault ~/Documents/llm-wiki-learnings "some question"
+   .venv/bin/python wiki_ingest.py --vault ~/Vaults/llm-wiki-learnings
+   .venv/bin/python wiki_query.py --vault ~/Vaults/llm-wiki-learnings "some question"
    ```
 6. Load the launchd plist (see below).
 
@@ -157,7 +162,7 @@ Once a vault is set up and scheduled, this is the actual workflow:
    ```
    or run it directly, bypassing launchd entirely:
    ```bash
-   .venv/bin/python wiki_ingest.py --vault ~/Documents/llm-wiki-learnings
+   .venv/bin/python wiki_ingest.py --vault ~/Vaults/llm-wiki-learnings
    ```
 3. **Check what it did.** `<vault>/wiki/log.md` is the agent's own account of
    what it read, what it changed, and any judgment calls it made (it runs
@@ -177,13 +182,13 @@ Once a vault is set up and scheduled, this is the actual workflow:
 5. **Ask it a question directly**, any time, without waiting for a
    scheduled run:
    ```bash
-   .venv/bin/python wiki_query.py --vault ~/Documents/llm-wiki-learnings "What have we learned about scoping agent tool schemas?"
+   .venv/bin/python wiki_query.py --vault ~/Vaults/llm-wiki-learnings "What have we learned about scoping agent tool schemas?"
    ```
    This is read-only — it answers by citing the specific wiki pages it
    drew from and never edits anything.
 6. **Audit the wiki** for problems that creep in over time:
    ```bash
-   .venv/bin/python wiki_lint.py --vault ~/Documents/llm-wiki-learnings
+   .venv/bin/python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings
    ```
    Report-only by default — without `--fix` it never writes to the vault.
    Structural checks (broken and self links, orphan pages, index gaps, page
@@ -222,7 +227,7 @@ Once a vault is set up and scheduled, this is the actual workflow:
    completed run — the lint worked.
 7. **Back the vault up to git**, if it has a remote:
    ```bash
-   .venv/bin/python vault_snapshot.py --vault ~/Documents/llm-wiki-learnings
+   .venv/bin/python vault_snapshot.py --vault ~/Vaults/llm-wiki-learnings
    ```
    Stages everything, commits as `Vault snapshot <date>: <n> files`, pushes.
    Exits without committing when nothing changed, so it is safe to schedule
@@ -240,7 +245,7 @@ Once a vault is set up and scheduled, this is the actual workflow:
    directly and touches no keychain, so it works in dark wake:
 
    ```bash
-   git -C ~/Documents/llm-wiki-learnings remote set-url origin git@github.com:<you>/<vault>.git
+   git -C ~/Vaults/llm-wiki-learnings remote set-url origin git@github.com:<you>/<vault>.git
    ```
 
    This is a separate job from the ingest, deliberately: a vault has two

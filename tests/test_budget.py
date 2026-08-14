@@ -6,6 +6,8 @@ the assertions are about *stopping* — that a spent budget raises instead of
 sleeping, and that nothing on the way out swallows it.
 """
 
+import time
+
 import requests
 
 from agent import budget, loop
@@ -34,6 +36,28 @@ def test_check_raises_once_deadline_passes():
 def test_check_passes_while_time_remains():
     budget.start_run(60)
     budget.check("the next source")
+
+
+# --- hard deadline (SIGALRM) -----------------------------------------------
+
+
+def test_watchdog_raises_from_a_blocking_call_no_check_can_reach():
+    """The 2026-08-13 case: the deadline passes while the process sits in a
+    syscall, with no checkpoint between it and the start of the run. sleep()
+    stands in for the read() that macOS held behind a consent prompt."""
+    budget.start_run(0.05)
+    try:
+        time.sleep(5)
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded as e:
+        assert "blocked outside any checkpoint" in str(e)
+
+
+def test_watchdog_is_disarmed_by_reset():
+    """Otherwise one test's timer fires partway through the next one."""
+    budget.start_run(0.05)
+    budget.reset()
+    time.sleep(0.2)  # must not raise
 
 
 def test_clamp_timeout_shortens_to_remaining():

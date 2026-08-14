@@ -18,7 +18,7 @@ Vault-agnostic, like the other entrypoints: a vault with no git remote simply
 does not schedule this job.
 
 Usage:
-    python vault_snapshot.py --vault ~/Documents/llm-wiki-learnings
+    python vault_snapshot.py --vault ~/Vaults/llm-wiki-learnings
 """
 
 import argparse
