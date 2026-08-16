@@ -47,6 +47,7 @@ from agent.notify import notify_failure
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
     delink_broken,
+    get_ingested_sources,
     linked_page_names,
     list_binary_raw_files,
     list_raw_files,
@@ -343,10 +344,20 @@ _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
 
 def check_lens_frontmatter(pages: dict[str, str]) -> list[str]:
     """Pages that describe themselves as an evaluation lens but no longer carry
-    the `lens: true` marker that makes them one."""
+    the `lens: true` marker that makes them one.
+
+    Dated logs are exempt (see _DATED_LOG). A lens is a concept page a human
+    authored; a dated capture is a record of one day, and RULES.md step 4 names
+    it after its source rather than after any concept. So a dated page can only
+    ever *mention* the tool — ai-chat-learnings-2026-08-03.md was reported for
+    the line "Updated `docs/tool-loading.md` to include `evaluate_against` in
+    the `web` group", which is a note about a day's work, not a self-description.
+    Exempting them cannot hide a real lens, and the alternative (reading around
+    inline code) would still flag the next page that discusses the tool in prose.
+    """
     findings = []
     for slug, content in sorted(pages.items()):
-        if not _LENS_PROSE.search(content):
+        if _DATED_LOG.search(slug) or not _LENS_PROSE.search(content):
             continue
         block = _FRONTMATTER.match(content)
         if block and _LENS_MARKER.search(block.group(1)):
@@ -430,6 +441,42 @@ def check_template_twins(pages: dict[str, str]) -> list[str]:
     ]
 
 
+def check_source_coverage(vault_path: str, pages: dict[str, str]) -> list[str]:
+    """Dated sources the ingest recorded as done that produced no page of their
+    own — the one thing RULES.md step 4 makes mandatory for a dated capture.
+
+    _ingest_source marks a source ingested as soon as *any* write lands, so a
+    run that wrote one topic page and stopped is indistinguishable from one that
+    did the whole job, and .ingested.json then guarantees it is never retried.
+    Observed 2026-08-03: AI-Chat-Learnings-2026-08-03.md was marked done having
+    written 3 of its 8 sessions into topic pages, with no dated page and no
+    log.md entry at all. Two sessions' material is simply absent from the vault,
+    and nothing reported it for two weeks.
+
+    The dated page is the check because it is the only per-source artefact whose
+    name is knowable in advance. Topic pages vary by content and cannot be
+    predicted; the log entry is free text. A missing dated page does not prove
+    material was lost, but every loss of this shape shows up as one.
+
+    Scoped to sources still present in raw/ and already marked ingested: a
+    source still in the queue has not failed at anything, and one deleted from
+    raw/ is a decision, not a gap."""
+    ingested = set(get_ingested_sources(vault_path))
+    named = {_letters(slug) for slug in pages}
+    findings = []
+    for name in sorted(list_raw_files(vault_path)["files"]):
+        stem = name.rsplit(".", 1)[0]
+        if name not in ingested or not _DATED_LOG.search(stem):
+            continue
+        if _letters(stem) not in named:
+            findings.append(
+                f"{name} is recorded as ingested but has no page named after "
+                f"it — the ingest stopped early and marked it done anyway. "
+                f"Remove it from wiki/.ingested.json to re-run it."
+            )
+    return findings
+
+
 def structural_findings(
     vault_path: str,
     today: datetime.date = None,
@@ -441,6 +488,7 @@ def structural_findings(
         "Broken and self links": check_links(pages),
         "Orphan pages": check_orphans(pages),
         "Index integrity": check_index(vault_path, pages),
+        "Source coverage": check_source_coverage(vault_path, pages),
         "Page format": check_format(vault_path, pages, today),
         "Misspelled slugs": check_slug_typos(pages),
         "Duplicate titles": check_duplicate_titles(pages),

@@ -191,10 +191,16 @@ Once a vault is set up and scheduled, this is the actual workflow:
    .venv/bin/python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings
    ```
    Report-only by default — without `--fix` it never writes to the vault.
-   Structural checks (broken and self links, orphan pages, index gaps, page
-   format, misspelled slugs, duplicate titles, template twins, lens integrity)
-   run in Python, so they are instant, free, and cannot miss a page. Exits
-   non-zero when it finds something.
+   Structural checks (broken and self links, orphan pages, index gaps, source
+   coverage, page format, misspelled slugs, duplicate titles, template twins,
+   lens integrity) run in Python, so they are instant, free, and cannot miss a
+   page. Exits non-zero when it finds something.
+
+   Source coverage is the one that catches an ingest that stopped early: a
+   source is recorded in `wiki/.ingested.json` as soon as any write lands, so a
+   run that wrote one page and died is never retried. A dated capture that owes
+   a page named after it and does not have one is reported here. Re-run it by
+   removing its name from `wiki/.ingested.json`.
 
    Add `--deep` for the checks code can't do — contradictions between pages,
    one concept split across two names, out-of-scope pages, and claims a newer

@@ -67,6 +67,10 @@ def test_read_raw_file_reads_and_falls_back_to_subdir(vault):
         ("see [[foo#section]]", {"foo"}),
         ("[[a]] and [[b|x]] and [[c.md]]", {"a", "b", "c"}),
         ("no links here", set()),
+        # A `[[` in a code span must not open a match that runs through the
+        # real link after it, nor may an unclosed [[ cross a line break.
+        ("Unclosed `[[` brackets break the [[owa]] linter", {"owa"}),
+        ("stray [[ opener\nnext line has [[foo]]", {"foo"}),
     ],
 )
 def test_linked_page_names(content, expected):
@@ -589,6 +593,42 @@ def test_write_wiki_page_does_not_mistake_a_body_separator_for_frontmatter(vault
     vault.page("colima", "# Colima\n\n**Summary**: s\n\n---\n\nBody.\n")
     wt.write_wiki_page(vault.path, "colima", "# Colima\n\nNew.\n")
     assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n\nNew.\n"
+
+
+def test_write_wiki_page_decodes_an_escaped_body(vault):
+    """A body the model json-encoded one time too many arrives as one line of
+    literal \\n. Written through, it costs the page its title, its header
+    fields and its links (observed 2026-08-16 on ollama.md)."""
+    wt.write_wiki_page(
+        vault.path,
+        "ollama",
+        "# Ollama\\n\\n**Summary**: Runs models \\\"locally\\\".\\n\\nSee [[agent-tools]].\\n",
+    )
+    written = (vault.root / "wiki" / "ollama.md").read_text()
+    assert written == '# Ollama\n\n**Summary**: Runs models "locally".\n\nSee [[agent-tools]].\n'
+
+
+def test_write_wiki_page_decodes_a_doubly_escaped_body(vault):
+    wt.write_wiki_page(vault.path, "ollama", "# Ollama\\\\n\\\\nBody.\\\\n")
+    assert (vault.root / "wiki" / "ollama.md").read_text() == "# Ollama\n\nBody.\n"
+
+
+def test_write_wiki_page_decodes_escaped_frontmatter_before_the_carry_over(vault):
+    """An escaped body opens with a literal '---', so the frontmatter check
+    would read it as supplying its own block and skip the carry-over."""
+    vault.page("owa", "---\nproject: true\n---\n\n# OWA\n")
+    wt.write_wiki_page(vault.path, "owa", "# Obsidian Wiki Agent\\n\\nBody.\\n")
+    written = (vault.root / "wiki" / "owa.md").read_text()
+    assert written.startswith("---\nproject: true\n---\n")
+    assert "# Obsidian Wiki Agent" in written
+
+
+def test_write_wiki_page_leaves_a_code_block_backslash_n_alone(vault):
+    """A page may legitimately show \\n in a snippet — just never more often
+    than it starts a new line."""
+    body = '# Regex\n\n**Summary**: s\n\nUse `re.split("\\n", text)` here.\n'
+    wt.write_wiki_page(vault.path, "regex", body)
+    assert (vault.root / "wiki" / "regex.md").read_text() == body
 
 
 def test_write_wiki_page_rejects_traversal(vault):

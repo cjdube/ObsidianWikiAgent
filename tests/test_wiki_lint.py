@@ -6,6 +6,7 @@ vault, so those use the fixture. The model --deep pass is not exercised here.
 """
 
 import datetime
+import json
 import re
 
 import pytest
@@ -92,6 +93,45 @@ def test_check_index_clean(vault):
     vault.page("a", good_page())
     vault.index("# Index\n\n- [[a]]\n")
     assert wl.check_index(vault.path, wl._pages(vault.path)) == []
+
+
+# --- check_source_coverage -------------------------------------------------
+
+
+def ingested(vault, *names):
+    (vault.root / "wiki" / ".ingested.json").write_text(json.dumps(list(names)))
+
+
+def test_check_source_coverage_flags_a_dated_source_with_no_page(vault):
+    """The 2026-08-03 shape: marked done having written only topic pages."""
+    vault.raw("AI-Chat-Learnings-2026-08-03.md", "notes", subdir="daily-ai")
+    vault.page("ollama", good_page())
+    ingested(vault, "AI-Chat-Learnings-2026-08-03.md")
+    findings = wl.check_source_coverage(vault.path, wl._pages(vault.path))
+    assert len(findings) == 1
+    assert "AI-Chat-Learnings-2026-08-03.md" in findings[0]
+
+
+def test_check_source_coverage_accepts_the_page_however_it_is_spelled(vault):
+    vault.raw("Strategic-Weekly-Review-2026-05-11.md", "notes")
+    vault.page("strategic-weekly-review-2026-05-11", good_page())
+    ingested(vault, "Strategic-Weekly-Review-2026-05-11.md")
+    assert wl.check_source_coverage(vault.path, wl._pages(vault.path)) == []
+
+
+def test_check_source_coverage_ignores_a_source_still_in_the_queue(vault):
+    """Not yet ingested is not a gap — it is waiting its turn."""
+    vault.raw("AI-Chat-Learnings-2026-08-15.md", "notes")
+    ingested(vault)
+    assert wl.check_source_coverage(vault.path, wl._pages(vault.path)) == []
+
+
+def test_check_source_coverage_ignores_an_undated_source(vault):
+    """RULES.md step 4 gives an article no page of its own, by design."""
+    vault.raw("landing-the-plane.md", "notes", subdir="clippings")
+    vault.page("zeigarnik-effect", good_page())
+    ingested(vault, "landing-the-plane.md")
+    assert wl.check_source_coverage(vault.path, wl._pages(vault.path)) == []
 
 
 # --- check_format ----------------------------------------------------------
@@ -449,6 +489,15 @@ def test_check_lens_frontmatter_flags_frontmatter_without_the_marker():
 def test_check_lens_frontmatter_ignores_ordinary_pages():
     page = "# Colima\n\n**Summary**: A container runtime.\n"
     assert wl.check_lens_frontmatter({"colima": page}) == []
+
+
+def test_check_lens_frontmatter_ignores_a_dated_log_that_mentions_the_tool():
+    """A day's record naming the tool is a note, not a self-description."""
+    page = (
+        "# AI Chat Learnings 2026-08-03\n\n"
+        "- Updated `docs/tool-loading.md` to include `evaluate_against`.\n"
+    )
+    assert wl.check_lens_frontmatter({"ai-chat-learnings-2026-08-03": page}) == []
 
 
 # --- main(): run boundaries, alerting, and the --deep budget ----------------

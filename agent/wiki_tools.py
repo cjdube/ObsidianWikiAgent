@@ -287,6 +287,47 @@ def read_wiki_page(vault_path: str, name: str) -> dict:
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---", re.DOTALL)
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
+_ESCAPE_RE = re.compile(r"\\(u[0-9a-fA-F]{4}|.)", re.DOTALL)
+
+
+def _unescape_once(content: str) -> str:
+    def repl(m: re.Match) -> str:
+        seq = m.group(1)
+        if seq.startswith("u"):
+            return chr(int(seq[1:], 16))
+        return _ESCAPES.get(seq, m.group(0))
+
+    return _ESCAPE_RE.sub(repl, content)
+
+
+def _decode_if_escaped(content: str) -> str:
+    """Undo JSON escaping the model applied to a page body one time too many.
+
+    The model composes the page, runs it through json.dumps to build the tool
+    call, and intermittently emits a body that had already been encoded — so
+    what arrives here is the two characters \\ and n where a newline belongs,
+    plus \\" for quotes and \\u2019 for a curly apostrophe. It reads fine in the
+    model's own transcript and lands on disk as one enormous line. Observed
+    2026-08-16 across four pages: every '# Title', '**Summary**:' and
+    '**Sources**:' line vanished from the linter's view at once, because there
+    were no lines, and one of those bodies then flooded index.md through the
+    Summary lookup that reads a line.
+
+    Nothing downstream can recover from it — Obsidian renders the wall of text,
+    and a later ingest re-reads the damage as the page's true content — so it is
+    caught at the boundary where the page enters the vault.
+
+    The test is the ratio, not the presence: a page may legitimately show \\n
+    inside a fenced code block, but never more often than it starts a new line.
+    Decoding repeats because bodies arrive doubly and triply encoded.
+    """
+    for _ in range(5):
+        if content.count("\\n") <= content.count("\n"):
+            break
+        content = _unescape_once(content)
+    return content
+
 
 def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
     """Write a page, carrying over any YAML frontmatter the caller left out.
@@ -333,6 +374,9 @@ def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
                      f"use {tool} instead."
         }
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Before the frontmatter check, which an escaped body would pass falsely:
+    # "---\nproject: true..." starts with '---' without holding a real block.
+    content = _decode_if_escaped(content)
     if path.is_file() and not content.startswith("---"):
         block = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
         if block:
@@ -386,17 +430,32 @@ def list_index_sections(vault_path: str) -> dict:
     return {"sections": sections}
 
 
+# A link target never contains a newline or a backtick, and never spans a code
+# span. Both exclusions come from one observed failure: a page whose body reads
+# "Unclosed `[[` brackets can cause the linter to swallow subsequent lines"
+# opened a match at the `[[` inside the backticks, ran past the real
+# [[obsidian-wiki-agent]] link that followed, and closed on its ]] — reporting a
+# broken link named "` brackets can cause the [[obsidian-wiki-agent" while the
+# genuine link went uncounted, which also makes its target look like an orphan.
+# Excluding backticks stops a code span's [[ from opening a match; excluding
+# newlines keeps one unclosed [[ from consuming the rest of the file.
+_LINK_RE = re.compile(r"\[\[([^\]\n`]+)\]\]")
+
+
+def _link_target(inner: str) -> str:
+    """The bare page stem a link body names — [[foo]], [[foo.md]], [[foo|alias]]
+    and [[foo#section]] all mean foo."""
+    name = inner.split("|", 1)[0].split("#", 1)[0].strip()
+    return name[:-3] if name.endswith(".md") else name
+
+
 def linked_page_names(content: str) -> set[str]:
-    """Page names already linked from index content, as bare stems —
-    [[foo]], [[foo.md]], [[foo|alias]] and [[foo#section]] all mean foo."""
-    names = set()
-    for target in re.findall(r"\[\[([^\]]+)\]\]", content):
-        name = target.split("|", 1)[0].split("#", 1)[0].strip()
-        if name.endswith(".md"):
-            name = name[:-3]
-        if name:
-            names.add(name)
-    return names
+    """Page names already linked from index content, as bare stems."""
+    return {
+        name
+        for inner in _LINK_RE.findall(content)
+        if (name := _link_target(inner))
+    }
 
 
 def delink_broken(content: str, valid: set[str]) -> tuple[str, int]:
@@ -415,15 +474,12 @@ def delink_broken(content: str, valid: set[str]) -> tuple[str, int]:
 
     def repl(m: re.Match) -> str:
         nonlocal count
-        target = m.group(1).split("|", 1)[0].split("#", 1)[0].strip()
-        if target.endswith(".md"):
-            target = target[:-3]
-        if target in valid:
+        if _link_target(m.group(1)) in valid:
             return m.group(0)
         count += 1
         return m.group(1).split("|", 1)[-1].strip()
 
-    return re.sub(r"\[\[([^\]]+)\]\]", repl, content), count
+    return _LINK_RE.sub(repl, content), count
 
 
 def _strip_unfiled(content: str) -> str:
