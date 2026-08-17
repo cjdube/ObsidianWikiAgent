@@ -28,14 +28,20 @@ scheduled lint show up as a run in LocalLLMAgent's dashboard, which reports on
 this repo's launchd jobs (see its docs/external-tasks.md). Findings log at INFO,
 never WARNING: they're a weekly read, not an alert.
 
+--json swaps the prose report for a machine-readable one, for a caller that
+renders its own UI (LocalLLMAgent's /wiki/lint view shells out to exactly this).
+It is the structural pass only, and it is deliberately silent — see _lint_json.
+
 Usage:
     python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings
     python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --deep
     python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --fix
+    python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --json
 """
 
 import argparse
 import datetime
+import json
 import re
 import sys
 from pathlib import Path
@@ -624,6 +630,49 @@ def _lint(args, rules_path: Path, logger) -> int:
     return count
 
 
+def _lint_json(args) -> int:
+    """The structural pass as one JSON object on stdout, for a UI to render.
+
+    Nothing here logs. That is the point, not an oversight: this path is driven
+    by a button, and setup_logger writes logs/wiki_lint.<vault>.log — the file
+    LocalLLMAgent's dashboard parses for this job's run history (see its
+    docs/external-tasks.md). A click that logged "Starting wiki lint run" would
+    invent a scheduled run that never happened, and a click that crashed
+    mid-write would leave a run its log_inspector reports as started-and-never-
+    finished. So no logger, no launchd-log trim, and no failure push either —
+    the caller gets the exception through a non-zero exit and reports it itself.
+
+    --deep is refused rather than ignored: it is a multi-minute model
+    conversation, which is not something a page load can wait on.
+
+    Exit code matches the prose path — 1 means findings exist, not failure.
+    """
+    if args.deep:
+        print("error: --json cannot be combined with --deep (the judgment pass "
+              "is a multi-minute model run)", file=sys.stderr)
+        return 2
+
+    vault = Path(args.vault)
+    if not (vault / "wiki").is_dir():
+        print(json.dumps({"error": f"no wiki/ directory in {vault}"}))
+        return 2
+
+    pages = _pages(args.vault)
+    fixes = []
+    if args.fix:
+        fixes = apply_safe_fixes(args.vault, pages)
+        pages = _pages(args.vault)  # reload so findings describe the fixed state
+
+    findings = structural_findings(args.vault, pages=pages)
+    print(json.dumps({
+        "vault": str(vault),
+        "pages": len(pages),
+        "sections": findings,
+        "fixes": fixes,
+    }))
+    return 1 if any(findings.values()) else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vault", required=True, help="Path to the Obsidian vault.")
@@ -639,7 +688,17 @@ def main() -> int:
         help="Apply the safe, mechanical fixes (strip self-links, de-link dead "
              "index entries) before reporting. Judgment calls are left alone.",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the structural findings as JSON instead of prose, and log "
+             "nothing. For a UI that renders its own report. Not valid with --deep.",
+    )
     args = parser.parse_args()
+
+    # Before setup_logger, deliberately — see _lint_json.
+    if args.json:
+        return _lint_json(args)
 
     vault_name = Path(args.vault).name
     logger = setup_logger(f"wiki_lint.{vault_name}")

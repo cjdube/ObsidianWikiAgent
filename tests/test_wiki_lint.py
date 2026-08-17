@@ -584,3 +584,81 @@ def test_check_format_accepts_a_citation_to_a_binary_source(vault):
     vault.raw("scan.png", content="\x00\x01binary")
     findings = wl.check_format(vault.path, {"a": good_page(sources="scan.png")}, TODAY)
     assert findings == []
+
+
+# --- --json (the UI path) --------------------------------------------------
+
+
+def _json_out(capsys) -> dict:
+    return json.loads(capsys.readouterr().out)
+
+
+def test_json_reports_findings_as_sections(vault, monkeypatch, capsys):
+    vault.raw("note.txt")
+    vault.page("orphan", good_page(title="Orphan"))
+    vault.index("# Index\n\n- [[orphan]]\n")
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path, "--json"])
+
+    assert wl.main() == 1                     # 1 means findings, not failure
+    payload = _json_out(capsys)
+    assert payload["pages"] == 1
+    assert payload["fixes"] == []
+    assert any("orphan.md is an orphan" in f for f in payload["sections"]["Orphan pages"])
+
+
+def test_json_clean_vault_returns_zero_with_every_section_present(vault, monkeypatch, capsys):
+    vault.raw("note.txt")
+    vault.page("a", good_page(title="A") + "\n[[b]]\n")
+    vault.page("b", good_page(title="B") + "\n[[a]]\n")
+    vault.index("# Index\n\n- [[a]]\n- [[b]]\n")
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path, "--json"])
+
+    assert wl.main() == 0
+    sections = _json_out(capsys)["sections"]
+    # Clean sections are still keys, so a UI can show what was checked.
+    assert sections["Orphan pages"] == []
+    assert set(sections) == set(wl.structural_findings(vault.path))
+
+
+def test_json_writes_no_log(vault, monkeypatch, capsys, tmp_path):
+    """The whole reason --json exists as a separate path: a button press must not
+    fabricate a run in LocalLLMAgent's dashboard."""
+    vault.page("a", good_page())
+    monkeypatch.setattr("sys.argv", ["wiki_lint.py", "--vault", vault.path, "--json"])
+    wl.main()
+    capsys.readouterr()
+    assert not list(tmp_path.glob("wiki_lint.*.log"))
+
+
+def test_json_fix_applies_then_reports_the_fixed_state(vault, monkeypatch, capsys):
+    vault.raw("note.txt")
+    vault.page("a", good_page(title="A") + "\nsee [[a]]\n")
+    vault.page("orphan", good_page(title="Orphan"))
+    vault.index("# Index\n\n- [[a]]\n- [[orphan]]\n")
+    monkeypatch.setattr(
+        "sys.argv", ["wiki_lint.py", "--vault", vault.path, "--json", "--fix"]
+    )
+
+    assert wl.main() == 1
+    payload = _json_out(capsys)
+    assert any("self-link" in c for c in payload["fixes"])
+    assert "[[a]]" not in (vault.root / "wiki" / "a.md").read_text()
+    # The self-link is gone from the report; the judgment call remains.
+    assert payload["sections"]["Broken and self links"] == []
+    assert payload["sections"]["Orphan pages"]
+
+
+def test_json_refuses_deep(vault, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "sys.argv", ["wiki_lint.py", "--vault", vault.path, "--json", "--deep"]
+    )
+    assert wl.main() == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_json_missing_vault_is_an_error_object_not_a_crash(vault, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        "sys.argv", ["wiki_lint.py", "--vault", str(tmp_path / "gone"), "--json"]
+    )
+    assert wl.main() == 2
+    assert "error" in _json_out(capsys)
