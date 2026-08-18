@@ -26,8 +26,7 @@ which needs nothing from here beyond the log format the scripts already use.
 Optional on both sides; see the `WREN_RUN_LOG` key in
 `launchd/template.plist.txt`.
 
-`LocalLLMAgent` is a private repo, so every mention of it below is context
-rather than something you can go read. Nothing here needs it: the whole of the
+`LocalLLMAgent` is a separate repo; nothing here needs it. The whole of the
 integration is the log format described under [Scheduling](#scheduling--launchd),
 and this repo runs standalone without it.
 
