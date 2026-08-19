@@ -95,7 +95,14 @@ The 6-iteration cap is only the default for callers that don't say otherwise —
 sending a bare family name Ollama can't resolve and retrying the 404 five
 times. Context overflow is silent (Ollama drops the oldest messages), so a run
 whose opening prompt already fills half of `OLLAMA_NUM_CTX` logs a warning
-before it starts accumulating tool results.
+before it starts accumulating tool results. That estimate only covers the part
+of a run that can't grow, so every Ollama turn also logs the prompt size Ollama
+itself reports (`prompt_eval_count`) at INFO, and warns past 70% of the window.
+Output length is capped by
+`OLLAMA_NUM_PREDICT` (2000): Ollama's own default is unlimited, so a repetition
+loop generates until the client times out — one such call cost a whole 45-minute
+run. A reply that stops at the cap logs a warning, so truncation is never
+silent either.
 
 ### `agent/wiki_tools.py`
 

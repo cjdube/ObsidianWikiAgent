@@ -248,6 +248,31 @@ def test_ollama_calls_send_num_ctx(monkeypatch):
         assert payload["options"]["num_ctx"] == 12345
 
 
+def test_ollama_calls_send_num_predict(monkeypatch):
+    """Ollama's default output length is unlimited, so an uncapped call can
+    generate until the client times out — which cost a whole ingest run."""
+    monkeypatch.setenv("OLLAMA_NUM_PREDICT", "777")
+    seen = []
+
+    def fake_post(url, payload, **kwargs):
+        seen.append(payload)
+        return FakeResp(200, json_data={"message": {"content": "done"}})
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama")
+    loop.complete_text("sys", "user", provider="ollama")
+
+    assert len(seen) == 2
+    for payload in seen:
+        assert payload["options"]["num_predict"] == 777
+
+
+def test_num_predict_defaults_when_unset(monkeypatch):
+    monkeypatch.delenv("OLLAMA_NUM_PREDICT", raising=False)
+    assert loop._ollama_options()["num_predict"] == 2000
+
+
 def test_ollama_tool_results_carry_the_tool_name(monkeypatch):
     """Several calls in one turn arrive as an ordered list; without a name the
     model has to infer which result belongs to which call."""
@@ -278,12 +303,13 @@ def test_ollama_tool_results_carry_the_tool_name(monkeypatch):
 class _Recorder:
     def __init__(self):
         self.warnings = []
+        self.infos = []
 
     def warning(self, msg):
         self.warnings.append(msg)
 
     def info(self, msg):
-        pass
+        self.infos.append(msg)
 
 
 def _quiet_post(monkeypatch):
@@ -313,5 +339,96 @@ def test_no_warning_when_the_prompt_fits_comfortably(monkeypatch):
 
     loop.run_agent("short system", "short user", tools=[], dispatch={},
                    provider="ollama", logger=logger)
+
+    assert logger.warnings == []
+
+
+# --- output-cap warning ----------------------------------------------------
+
+
+def test_warns_when_a_reply_stops_at_the_cap(monkeypatch):
+    """A capped reply that says nothing trades a loud failure for a quiet
+    wrong answer — a half-written page looks like a finished one."""
+    monkeypatch.setenv("OLLAMA_NUM_PREDICT", "2000")
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data={
+            "message": {"content": "cut off mid-"},
+            "done_reason": "length",
+            "prompt_eval_count": 23808,
+        }),
+    )
+    logger = _Recorder()
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama", logger=logger)
+
+    assert any("num_predict=2000" in w for w in logger.warnings)
+    assert any("23808" in w for w in logger.warnings)
+
+
+def test_measures_the_real_prompt_every_iteration(monkeypatch):
+    """The opening-prompt estimate cannot see growth from tool results, which
+    is where all of it happens. prompt_eval_count is Ollama's own count."""
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "32768")
+    payloads = [
+        {"message": {"tool_calls": [{"function": {"name": "t", "arguments": {}}}]},
+         "prompt_eval_count": 4000},
+        {"message": {"content": "done"}, "prompt_eval_count": 9000},
+    ]
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data=payloads.pop(0)),
+    )
+    logger = _Recorder()
+
+    loop.run_agent("sys", "user", tools=[], dispatch={"t": lambda **kw: {}},
+                   provider="ollama", logger=logger)
+
+    sizes = [i for i in logger.infos if "prompt" in i]
+    assert "prompt 4000 tokens on iteration 1" in sizes[0]
+    assert "prompt 9000 tokens on iteration 2" in sizes[1]
+    assert logger.warnings == []
+
+
+def test_warns_when_the_measured_prompt_crosses_the_fraction(monkeypatch):
+    """The failing run sat at 23808/32768 = 73% and said nothing."""
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "32768")
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data={
+            "message": {"content": "done"}, "prompt_eval_count": 23808,
+        }),
+    )
+    logger = _Recorder()
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama", logger=logger)
+
+    assert any("23808 tokens" in w and "73%" in w for w in logger.warnings)
+    assert any("OLLAMA_NUM_CTX" in w for w in logger.warnings)
+
+
+def test_prompt_size_is_silent_when_ollama_does_not_report_it(monkeypatch):
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data={"message": {"content": "done"}}),
+    )
+    logger = _Recorder()
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama", logger=logger)
+
+    assert logger.warnings == []
+    assert not [i for i in logger.infos if "prompt" in i]
+
+
+def test_no_cap_warning_on_a_normal_stop(monkeypatch):
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data={
+            "message": {"content": "done"}, "done_reason": "stop",
+        }),
+    )
+    logger = _Recorder()
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama", logger=logger)
 
     assert logger.warnings == []

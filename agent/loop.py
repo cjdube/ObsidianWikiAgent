@@ -217,13 +217,99 @@ def _ollama_options() -> dict:
     32768 matches the default of the Ollama this was built against (0.32.3);
     naming it here means an upstream change to that default cannot start
     truncating runs without anyone noticing.
+
+    `num_predict` caps how much one reply may be. Ollama's default for
+    /api/chat is unlimited, so a repetition loop generates until the context
+    fills or the client hangs up. On 2026-08-19 that cost a whole ingest run:
+    one call ran away, four ReadTimeout retries resent the identical prompt
+    (deterministic, not a flake) at exactly 10 minutes each, and the 45-minute
+    run budget expired with 0/2 sources done. A step here is a tool call or a
+    page write; neither legitimately needs 2000 tokens, so a runaway now ends
+    in about a minute and the run keeps its budget. Truncation at the cap is
+    logged (see _warn_if_reply_hit_the_cap) rather than silent.
     """
-    return {"num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "32768"))}
+    return {
+        "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "32768")),
+        "num_predict": int(os.getenv("OLLAMA_NUM_PREDICT", "2000")),
+    }
+
+
+def _warn_if_reply_hit_the_cap(
+    data: dict, logger: Optional[logging.Logger]
+) -> None:
+    """Say something when a reply stopped because it hit num_predict.
+
+    Without this the cap trades a loud failure for a quiet wrong answer: a
+    half-written page or a truncated tool call looks like a normal response.
+    Ollama reports the reason as done_reason == 'length'.
+    """
+    if logger is None or data.get("done_reason") != "length":
+        return
+    logger.warning(
+        f"Model reply stopped at num_predict="
+        f"{_ollama_options()['num_predict']} (prompt was "
+        f"{data.get('prompt_eval_count', '?')} tokens) — the reply is cut off. "
+        f"Raise OLLAMA_NUM_PREDICT in config/.env if this was a legitimate "
+        f"long answer rather than a repetition loop."
+    )
 
 
 # Rough bytes-per-token for prose and markdown. Only ever decides whether to
 # log a warning, so being 20% out costs nothing.
+#
+# It is more than 20% out: the 2026-08-19 prompt measured 67,483 chars for the
+# 23,808 tokens Ollama counted, i.e. ~2.8, because wiki-links and code
+# tokenize denser than prose. Left at 4 deliberately — this constant now only
+# feeds the pre-flight guess in _warn_if_context_is_tight, and _log_prompt_size
+# reports Ollama's own count from the first response onward. Changing it would
+# retune a guess that a measurement has already replaced.
 _CHARS_PER_TOKEN = 4
+
+# Fraction of num_ctx at which a measured prompt is worth a warning. The prompt
+# still has to hold the reply (num_predict) and at least one more tool result,
+# and on this vault a single page read is ~4,500 tokens — so at 70% of a 32768
+# window the ~9,800 tokens left is one big read away from overflow. The run
+# that prompted all this sat at 73% with nothing in any log to say so.
+_CONTEXT_WARN_FRACTION = 0.70
+
+
+def _log_prompt_size(
+    data: dict,
+    iteration: int,
+    num_ctx: int,
+    logger: Optional[logging.Logger],
+) -> None:
+    """Record how big the prompt actually was, as Ollama itself counted it.
+
+    _warn_if_context_is_tight can only see the opening prompt, which is the one
+    part of a run that does not grow. That is why the 2026-08-19 run passed it
+    in silence: system + user was ~3,500 tokens, but by the twelfth call the
+    accumulated tool results had taken the prompt to 23,808 — 73% of the
+    window, and 38% of it one wiki page that had been read twice.
+
+    prompt_eval_count comes back on every non-streaming response for free, so
+    this is a measurement rather than an estimate, and it lands once per
+    iteration — which is exactly where the growth happens.
+    """
+    if logger is None:
+        return
+    count = data.get("prompt_eval_count")
+    if count is None:
+        # Not every Ollama build reports it, and there is nothing to say if so.
+        return
+    fill = count / num_ctx
+    message = (
+        f"prompt {count} tokens on iteration {iteration} "
+        f"({fill:.0%} of num_ctx={num_ctx})"
+    )
+    if fill >= _CONTEXT_WARN_FRACTION:
+        logger.warning(
+            f"{message} — overflow is silent (Ollama drops the oldest "
+            f"messages). Raise OLLAMA_NUM_CTX in config/.env, or cut what the "
+            f"loop feeds back in."
+        )
+    else:
+        logger.info(message)
 
 
 def _warn_if_context_is_tight(
@@ -291,6 +377,8 @@ def _run_ollama(
             logger=logger,
         )
         data = resp.json()
+        _log_prompt_size(data, iteration + 1, options["num_ctx"], logger)
+        _warn_if_reply_hit_the_cap(data, logger)
         message = data["message"]
         messages.append(message)
 
@@ -450,7 +538,11 @@ def complete_text(
         },
         timeout=int(os.getenv("OLLAMA_TIMEOUT", "300")),
     )
-    return resp.json()["message"].get("content", "").strip()
+    data = resp.json()
+    # No logger is passed in here, so use the module's — a truncated
+    # single-turn answer is exactly as silent as a truncated loop turn.
+    _warn_if_reply_hit_the_cap(data, logging.getLogger(__name__))
+    return data["message"].get("content", "").strip()
 
 
 def list_gemini_models() -> list[str]:
