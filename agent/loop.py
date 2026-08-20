@@ -207,6 +207,39 @@ def _truncated_call(fn_name: str, logger: Optional[logging.Logger]) -> dict:
     }
 
 
+def _truncated_reply_nudge(logger: Optional[logging.Logger]) -> dict:
+    """The message to send back when a reply was cut off before any tool call.
+
+    The other half of the truncation case. _truncated_call covers the cut that
+    lands *inside* a call; this one lands before the model wrote anything
+    parseable, so Ollama returns done_reason='length' with no tool calls and no
+    content at all. Verified live on 2026-08-20 against gemma4:26b-mlx at
+    num_predict 600 and 1200.
+
+    The loop used to return that empty content as the final answer, which reads
+    downstream as a model that chose to do nothing: wiki_ingest logged
+    'produced no wiki writes' and spent one of its three attempts on the source
+    for a reply that never finished a sentence. So say what happened and let the
+    model try again shorter — the turn is not over.
+    """
+    if logger:
+        logger.warning(
+            f"Reply was cut off at num_predict="
+            f"{_ollama_options()['num_predict']} before any tool call — "
+            f"nudging the model to answer shorter rather than treating the "
+            f"empty reply as a final answer."
+        )
+    return {
+        "role": "user",
+        "content": (
+            "Your last reply was cut off at the reply-length limit before you "
+            "finished it, so none of it reached me. Answer again, shorter: "
+            "make one tool call at a time, and keep any page you write "
+            "concise or split it into two pages linked to each other."
+        ),
+    }
+
+
 def _post_with_retry(
     url: str,
     payload: dict,
@@ -476,6 +509,9 @@ def _run_ollama(
 
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
+            if data.get("done_reason") == "length":
+                messages.append(_truncated_reply_nudge(logger))
+                continue
             return message.get("content", "")
 
         # Ollama reports the cut on the whole reply, not per call, so every

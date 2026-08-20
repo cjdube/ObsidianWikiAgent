@@ -555,3 +555,71 @@ def test_a_complete_reply_still_runs_its_tool_call(monkeypatch):
     )
 
     assert ran == [{"name": "ollama.md", "content": "# Ollama\n"}]
+
+
+def test_a_reply_cut_off_before_any_tool_call_is_not_a_final_answer(monkeypatch):
+    """The other half of the truncation case: the cut lands *before* the model
+    emits anything parseable, so Ollama returns done_reason=length with no tool
+    calls and no content. Verified live on 2026-08-20 against gemma4:26b-mlx at
+    num_predict 600 and 1200. Returning that empty string as the final answer
+    made wiki_ingest log 'produced no wiki writes' and burn a whole retry of the
+    source, so the loop has to nudge and keep going instead."""
+    payloads = [
+        {"message": {"content": ""}, "done_reason": "length"},
+        {"message": {"content": "done"}, "done_reason": "stop"},
+    ]
+    sent = []
+
+    def fake_post(url, payload, **kwargs):
+        sent.append(payload)
+        return FakeResp(200, json_data=payloads.pop(0))
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+    logger = _Recorder()
+
+    answer = loop.run_agent(
+        "sys", "user", tools=[], dispatch={}, provider="ollama", logger=logger,
+    )
+
+    assert answer == "done", "the truncated turn must not end the loop"
+    # The payload holds the live message list, so read the user turns rather
+    # than the tail: by now the second reply has been appended too.
+    said = [m["content"] for m in sent[1]["messages"] if m.get("role") == "user"]
+    assert len(said) == 2, "the nudge should be the only message added"
+    assert "cut off" in said[1]
+
+
+def test_a_run_that_only_ever_truncates_reports_itself_incomplete(monkeypatch):
+    """A caller has to be able to tell a truncated run from a genuine no-op, so
+    the nudge must not turn into a silent empty answer when it never lands."""
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data={
+            "message": {"content": ""}, "done_reason": "length",
+        }),
+    )
+
+    answer = loop.run_agent(
+        "sys", "user", tools=[], dispatch={}, provider="ollama", max_iterations=3,
+    )
+
+    assert answer.startswith(loop.INCOMPLETE_PREFIX)
+
+
+def test_an_empty_reply_that_stopped_normally_is_still_the_answer(monkeypatch):
+    """The nudge keys off done_reason, so an ordinary empty answer must still
+    come straight back rather than costing another round trip."""
+    calls = []
+
+    def fake_post(url, payload, **kwargs):
+        calls.append(payload)
+        return FakeResp(200, json_data={
+            "message": {"content": ""}, "done_reason": "stop",
+        })
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    answer = loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama")
+
+    assert answer == ""
+    assert len(calls) == 1
