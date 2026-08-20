@@ -88,8 +88,11 @@ differs; each provider owns its own request/history translation and they share
 the tool-dispatch step.
 
 The 6-iteration cap is only the default for callers that don't say otherwise —
-`wiki_ingest.py` raises it to 30 (one source can touch 10–15 pages) and
-`wiki_lint.py --deep` to 60.
+`wiki_ingest.py` raises it to 30 (one source can touch 10–15 pages),
+`wiki_lint.py --deep` to 60, and `wiki_query.py` to 15 (the index plus several
+pages). A loop that runs out of turns returns a `[incomplete: …]` marker rather
+than an answer; `wiki_query.py` exits non-zero when it sees one, so a truncated
+run can't pass for a real reply.
 
 `OLLAMA_MODEL` has no fallback: an unset one raises with the fix rather than
 sending a bare family name Ollama can't resolve and retrying the 404 five

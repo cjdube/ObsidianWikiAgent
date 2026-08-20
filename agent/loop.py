@@ -68,6 +68,12 @@ def _ollama_model(explicit: Optional[str] = None) -> str:
     return model
 
 
+# run_agent returns a string either way, so this is how a caller tells a real
+# answer from a loop that ran out of turns. Named rather than spelled out at
+# each end, so the two cannot drift.
+INCOMPLETE_PREFIX = "[incomplete:"
+
+
 def _incomplete(max_iterations: int, logger: Optional[logging.Logger]) -> str:
     """The both-providers answer when the loop runs out of iterations."""
     if logger:
@@ -76,8 +82,8 @@ def _incomplete(max_iterations: int, logger: Optional[logging.Logger]) -> str:
             "final answer — returning best-effort partial result"
         )
     return (
-        f"[incomplete: hit max_iterations={max_iterations} tool calls without "
-        "reaching a final answer]"
+        f"{INCOMPLETE_PREFIX} hit max_iterations={max_iterations} tool calls "
+        "without reaching a final answer]"
     )
 
 
