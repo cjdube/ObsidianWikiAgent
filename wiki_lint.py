@@ -650,6 +650,10 @@ def _lint_json(args) -> int:
     --deep is refused rather than ignored: it is a multi-minute model
     conversation, which is not something a page load can wait on.
 
+    --fix, by contrast, is honoured. Nothing above should be read as making
+    this path read-only: --json --fix writes to the vault exactly as the prose
+    path does, so a button wired to it is a button that edits pages.
+
     Exit code matches the prose path — 1 means findings exist, not failure.
     """
     if args.deep:

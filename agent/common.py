@@ -53,6 +53,25 @@ def setup_logger(name: str) -> logging.Logger:
     return logger
 
 
+def _is_our_stdout(path: Path) -> bool:
+    """Whether `path` really is the file this process's stdout is writing to.
+
+    WIKI_LAUNCHD_LOG is a plist key a human repeats by hand from
+    StandardOutPath, and the function below rewrites whatever it names, in
+    place, keeping only the tail. Point it at the *structured* log by mistake
+    and a scheduled job quietly destroys the forensic record SECURITY.md
+    designates as the one to trust. Compare inodes rather than trusting the
+    string, since only the descriptor knows where stdout actually goes.
+
+    False whenever stdout has no descriptor to ask (a pipe under a test
+    harness, a closed stream), which is the safe answer: don't trim.
+    """
+    try:
+        return os.path.samestat(os.stat(path), os.fstat(sys.stdout.fileno()))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def trim_launchd_log(logger: logging.Logger = None) -> None:
     """Cap the launchd stdout/stderr log, keeping its tail.
 
@@ -69,6 +88,15 @@ def trim_launchd_log(logger: logging.Logger = None) -> None:
         return
 
     path = Path(path_str)
+    if not _is_our_stdout(path):
+        if logger:
+            logger.warning(
+                f"{LAUNCHD_LOG_ENV} names {path}, which is not the file this "
+                f"process's stdout is writing to — leaving it alone. In the "
+                f".plist that key must repeat StandardOutPath exactly."
+            )
+        return
+
     try:
         size = path.stat().st_size
         if size <= _LAUNCHD_LOG_MAX_BYTES:

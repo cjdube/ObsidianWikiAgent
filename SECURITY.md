@@ -25,9 +25,14 @@ Three exceptions, all in your control:
   adding it to a plist's `EnvironmentVariables`. Concrete plists are
   gitignored, so that choice never travels with a clone; if you make it for a
   scheduled job, vault content goes to a third party on that job's schedule.
-- **ntfy failure alerts** (`NTFY_URL`) carry the job name and an error string.
-  The error can include a source filename or path, so a filename is the most
-  that escapes this way — never page content.
+- **ntfy failure alerts** (`NTFY_URL`) carry the job name and an error string,
+  truncated to 500 characters. In practice that error is a filename or a path.
+  It is not *guaranteed* to be content-free, though: the detail passed to
+  `notify_failure` is whatever exception ended the run, and a few carry a
+  fragment of what they were reading — a `JSONDecodeError` from a malformed
+  model response quotes part of that response, which mid-run is the page being
+  written. Treat it as "filenames and paths, with a small tail risk", not as a
+  guarantee.
 - **`vault_snapshot.py`** pushes the vault to whatever git remote *the vault*
   has. That remote is yours to choose; make sure a private vault has a private
   remote.

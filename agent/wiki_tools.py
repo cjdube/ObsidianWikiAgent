@@ -560,10 +560,10 @@ def _ensure_descriptions(vault_path: str, lines: list[str]) -> list[str]:
     """
     out = []
     for line in lines:
-        name = _entry_name(line)
-        if name and not _ENTRY_RE.match(line).group(2).strip():
-            summary = _page_summary(vault_path, name)
-            if summary:
+        m = _ENTRY_RE.match(line)
+        if m and not m.group(2).strip():
+            name = link_target(m.group(1))
+            if name and (summary := _page_summary(vault_path, name)):
                 line = f"- [[{name}]] {summary}"
         out.append(line)
     return out
