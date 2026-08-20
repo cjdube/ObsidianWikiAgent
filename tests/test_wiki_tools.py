@@ -662,6 +662,36 @@ def test_write_wiki_page_does_not_mistake_a_body_separator_for_frontmatter(vault
     assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n\nNew.\n"
 
 
+def test_write_wiki_page_keeps_frontmatter_when_the_body_opens_with_a_rule(vault):
+    """'---' at the top of a body is a horizontal rule, not the caller
+    supplying frontmatter. Reading it as one dropped the very block this guard
+    exists to preserve — the `lens: true` marker nothing else notices is gone."""
+    vault.page("ai-slop", LENS_PAGE)
+    wt.write_wiki_page(vault.path, "ai-slop", "---\n\n# AI Slop\n\nNew body.\n")
+    written = (vault.root / "wiki" / "ai-slop.md").read_text()
+    assert written.startswith(FRONTMATTER)
+    assert "lens: true" in written
+    assert "New body." in written
+
+
+def test_write_wiki_page_rejects_a_nested_name(vault):
+    """It used to succeed, creating wiki/topics/ — and then nothing could see
+    the page: list_wiki_pages uses iterdir, so it was absent from the index and
+    from every lint check, while update_index refused to file it."""
+    result = wt.write_wiki_page(vault.path, "topics/foo", "# Foo\n")
+    assert "nest" in result["error"]
+    assert not (vault.root / "wiki" / "topics").exists()
+
+
+def test_read_wiki_page_rejects_a_nested_name(vault):
+    assert "nest" in wt.read_wiki_page(vault.path, "topics/foo")["error"]
+
+
+def test_safe_page_path_allows_a_name_that_resolves_back_to_flat(vault):
+    """'sub/../foo' names wiki/foo.md, which is where pages go."""
+    assert wt._safe_page_path(vault.path, "sub/../foo").name == "foo.md"
+
+
 def test_write_wiki_page_decodes_an_escaped_body(vault):
     """A body the model json-encoded one time too many arrives as one line of
     literal \\n. Written through, it costs the page its title, its header

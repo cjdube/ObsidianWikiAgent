@@ -55,13 +55,32 @@ def _wiki_dir(vault_path: str) -> Path:
 
 
 def _safe_page_path(vault_path: str, name: str) -> Path:
-    """Resolve a wiki page name to a path inside <vault>/wiki, rejecting any
-    attempt to escape that directory (e.g. via '../')."""
+    """Resolve a wiki page name to a path directly inside <vault>/wiki.
+
+    Two things are refused. Escaping the directory (via '../', an absolute
+    path, or a symlink out of it) is the obvious one — the comparison is
+    against .resolve()d paths, so all three are caught.
+
+    Nesting is the other, and containment alone allowed it: 'topics/foo'
+    resolves *inside* wiki/, so write_wiki_page created wiki/topics/ and
+    reported success — and then nothing could see the page. list_wiki_pages
+    uses iterdir rather than rglob, so the file was missing from the index,
+    from every structural check, and from the orphan scan, while update_index
+    refused it with "no wiki page named 'topics/foo'". A write that lands
+    where nothing reads is worse than a refused one, which at least tells the
+    model to pick another name. wiki/ is flat by design; this makes it so.
+    """
     filename = name if name.endswith(".md") else f"{name}.md"
     wiki_dir = _wiki_dir(vault_path).resolve()
     candidate = (wiki_dir / filename).resolve()
     if wiki_dir not in candidate.parents:
         raise ValueError(f"page name '{name}' resolves outside the wiki directory")
+    if candidate.parent != wiki_dir:
+        raise ValueError(
+            f"page name '{name}' would nest the page in a subdirectory of "
+            f"wiki/, where nothing lists it — wiki pages are flat, so use a "
+            f"hyphenated name like '{filename.replace('/', '-')}'"
+        )
     return candidate
 
 
@@ -419,7 +438,10 @@ def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
     # Before the frontmatter check, which an escaped body would pass falsely:
     # "---\nproject: true..." starts with '---' without holding a real block.
     content = _decode_if_escaped(content)
-    if path.is_file() and not content.startswith("---"):
+    # Matched, not startswith: a body that opens with a '---' horizontal rule
+    # is not the caller supplying frontmatter, and reading it as one dropped
+    # the block this guard exists to preserve.
+    if path.is_file() and not _FRONTMATTER_RE.match(content):
         block = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
         if block:
             content = f"{block.group(0)}\n\n{content.lstrip()}"
