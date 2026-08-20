@@ -492,3 +492,66 @@ def test_no_cap_warning_on_a_normal_stop(monkeypatch):
     loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama", logger=logger)
 
     assert logger.warnings == []
+
+
+def test_a_truncated_reply_does_not_run_its_tool_call(monkeypatch):
+    """A reply that stops at num_predict stops *mid-call*, and Ollama still
+    hands back the arguments it managed to parse — so a half-written page
+    arrives looking like a complete call. Observed 4 times in the 2026-08-20
+    ingest: each was saved only by 'name' being emitted after 'content' and so
+    falling off the end, which turned the truncation into a confusing
+    missing-argument TypeError. Emitted the other way round it would have
+    written the truncated body over a real page."""
+    ran = []
+    payloads = [
+        {"message": {"tool_calls": [{"function": {
+            "name": "write_wiki_page",
+            "arguments": {"name": "ollama.md", "content": "# Ollama\n\ncut off mid-"},
+        }}]}, "done_reason": "length"},
+        {"message": {"content": "done"}, "done_reason": "stop"},
+    ]
+    sent = []
+
+    def fake_post(url, payload, **kwargs):
+        sent.append(payload)
+        return FakeResp(200, json_data=payloads.pop(0))
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+    logger = _Recorder()
+
+    loop.run_agent(
+        "sys", "user", tools=[],
+        dispatch={"write_wiki_page": lambda **kw: ran.append(kw) or {"written": "x"}},
+        provider="ollama", logger=logger,
+    )
+
+    assert ran == [], "the truncated call must not reach the tool"
+    fed_back = [m for m in sent[1]["messages"] if m.get("role") == "tool"]
+    assert len(fed_back) == 1
+    assert "cut off" in fed_back[0]["content"]
+    assert "write_wiki_page" in fed_back[0]["content"]
+
+
+def test_a_complete_reply_still_runs_its_tool_call(monkeypatch):
+    """The truncation guard keys off done_reason, so the ordinary path has to
+    keep working — including the 'stop' Ollama sends on a well-formed call."""
+    ran = []
+    payloads = [
+        {"message": {"tool_calls": [{"function": {
+            "name": "write_wiki_page",
+            "arguments": {"name": "ollama.md", "content": "# Ollama\n"},
+        }}]}, "done_reason": "stop"},
+        {"message": {"content": "done"}, "done_reason": "stop"},
+    ]
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data=payloads.pop(0)),
+    )
+
+    loop.run_agent(
+        "sys", "user", tools=[],
+        dispatch={"write_wiki_page": lambda **kw: ran.append(kw) or {"written": "x"}},
+        provider="ollama",
+    )
+
+    assert ran == [{"name": "ollama.md", "content": "# Ollama\n"}]

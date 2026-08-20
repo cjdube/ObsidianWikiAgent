@@ -169,6 +169,44 @@ def _dispatch_tool(
     return result
 
 
+def _truncated_call(fn_name: str, logger: Optional[logging.Logger]) -> dict:
+    """The result to feed back for a tool call that arrived cut off.
+
+    A reply that stops at num_predict stops wherever it happened to be, and if
+    that is inside a tool call Ollama still returns whatever arguments it
+    managed to parse. The call then arrives looking complete while missing
+    every character the model had not written yet.
+
+    Running it is the danger. write_wiki_page replaces whole files, so a
+    truncated 'content' is a half page written over a real one — and nothing
+    downstream would notice, because a short page is not a malformed page.
+    The 2026-08-20 ingest hit this four times and got away with it only by
+    accident: the model emits 'content' before 'name', so the cut took 'name'
+    with it and the call died on a missing-argument TypeError instead. That
+    TypeError was also actively misleading — it sent the model back to re-emit
+    the same oversized page, which truncated again, three times in a row.
+
+    So refuse the call and say why. The model can act on this one: the fix is
+    a shorter page, not a re-send.
+    """
+    if logger:
+        logger.warning(
+            f"Refused a truncated '{fn_name}' call — the reply hit "
+            f"num_predict={_ollama_options()['num_predict']} mid-call, so its "
+            f"arguments are incomplete. Not running it."
+        )
+    return {
+        "error": (
+            f"tool '{fn_name}' was not run: your reply was cut off at the "
+            f"reply-length limit before you finished writing the call, so its "
+            f"arguments are missing text. Do not send the same call again — it "
+            f"will be cut off in the same place. Send a shorter one instead: "
+            f"for a page, write a more concise page, or split it into two "
+            f"pages linked to each other."
+        )
+    }
+
+
 def _post_with_retry(
     url: str,
     payload: dict,
@@ -440,10 +478,18 @@ def _run_ollama(
         if not tool_calls:
             return message.get("content", "")
 
+        # Ollama reports the cut on the whole reply, not per call, so every
+        # call in a truncated turn is suspect: only the last one can actually
+        # be short, but nothing in the response says which that is.
+        truncated = data.get("done_reason") == "length"
+
         for call in tool_calls:
             fn_name = call["function"]["name"]
             fn_args = call["function"].get("arguments", {})
-            result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
+            if truncated:
+                result = _truncated_call(fn_name, logger)
+            else:
+                result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
             # tool_name matters once a turn carries several calls: without it
             # the model gets an ordered list of unlabelled results and has to
             # infer which is which. The Gemini path has always named them.
