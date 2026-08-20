@@ -13,9 +13,12 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = _ROOT / "logs"
 
-# The structured log records every tool call with its full JSON result, so a
-# daily ingest writes megabytes a month and nothing ever removed them (27.8 MB
-# by August 2026). 5 MB x 4 keeps roughly a quarter's history.
+# The structured log records every tool call, so a daily ingest writes megabytes
+# a month and nothing ever removed them (27.8 MB by August 2026). 5 MB x 4 keeps
+# roughly a quarter's history — which only holds now that agent/loop.py clips
+# each logged argument and result (_LOG_VALUE_MAX_CHARS). While it wrote whole
+# sources and whole page bodies verbatim, one dense run could turn all four
+# files over by itself and the retention was a day, not a quarter.
 _LOG_MAX_BYTES = 5_000_000
 _LOG_BACKUP_COUNT = 3
 

@@ -75,8 +75,11 @@ The record outside the model's reach is the structured log,
 `logs/wiki_ingest.<vault>.log`. Python writes one line per dispatch — `tool_call
 <name>(<args>) -> <result>` — from the actual call, before the model sees the
 outcome and with no tool that can edit it. If a run's behaviour is in question,
-that is the file to read. Note it therefore contains verbatim source and page
-content, which is why `logs/*.log*` is gitignored.
+that is the file to read. Each logged argument and result is clipped at 2,000
+characters (`_LOG_VALUE_MAX_CHARS` in `agent/loop.py`) so the log keeps the
+shape of a run rather than a second copy of the vault — but 2,000 characters of
+a source or a page is still source and page content, which is why `logs/*.log*`
+is gitignored.
 
 Binaries in `raw/` are refused rather than decoded, for a related reason
 documented at `_is_text_source`: a PNG decoded with `errors="replace"` yields

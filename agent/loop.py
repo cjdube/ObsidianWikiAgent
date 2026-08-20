@@ -81,6 +81,35 @@ def _incomplete(max_iterations: int, logger: Optional[logging.Logger]) -> str:
     )
 
 
+# How much of one tool argument or result value reaches the structured log.
+#
+# That log is the record outside the model's reach (see SECURITY.md), so it has
+# to keep the shape of every call: which tool, with which page name, and whether
+# it worked. It does not have to keep a second verbatim copy of a file that is
+# already on disk — and keeping one cost the log its own history. read_raw_file
+# returns whole sources (one observed source was 366 KB) and write_wiki_page
+# takes whole pages, so a single dense run writes several MB into a 5 MB x 3
+# rotation and can age out the entire retention window in a day, taking with it
+# exactly the forensic record the rotation exists to preserve.
+_LOG_VALUE_MAX_CHARS = 2000
+
+
+def _clip(value: str) -> str:
+    if len(value) <= _LOG_VALUE_MAX_CHARS:
+        return value
+    dropped = len(value) - _LOG_VALUE_MAX_CHARS
+    return f"{value[:_LOG_VALUE_MAX_CHARS]}… [+{dropped} chars]"
+
+
+def _clip_values(payload: dict) -> dict:
+    """`payload` with every long string value shortened, keys untouched.
+
+    Per value rather than over the whole rendered dict: clipping the rendering
+    would let one 20 KB page body push the page's *name* out of the line, and
+    the name is the part worth keeping."""
+    return {k: _clip(v) if isinstance(v, str) else v for k, v in payload.items()}
+
+
 def _dispatch_tool(
     fn_name: str,
     fn_args: dict,
@@ -121,7 +150,10 @@ def _dispatch_tool(
         except Exception as e:
             result = {"error": f"tool '{fn_name}' raised: {e}"}
     if logger:
-        logger.info(f"tool_call {fn_name}({fn_args}) -> {json.dumps(result)}")
+        logger.info(
+            f"tool_call {fn_name}({_clip_values(fn_args)}) -> "
+            f"{json.dumps(_clip_values(result))}"
+        )
     return result
 
 

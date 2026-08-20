@@ -4,6 +4,8 @@ No network: requests.post (and the retry helper, for run_agent) is mocked, and
 time.sleep is neutralized so backoff paths run instantly.
 """
 
+import logging
+
 import requests
 
 from agent import loop
@@ -51,6 +53,42 @@ def test_dispatch_tool_exception_is_caught():
     result = loop._dispatch_tool("boom", {}, {"boom": boom}, None)
     assert "raised" in result["error"]
     assert "kaboom" in result["error"]
+
+
+def test_dispatch_log_clips_a_huge_result(caplog):
+    """read_raw_file returns whole sources. Logged verbatim, one dense run can
+    turn over the whole 5 MB x 3 rotation and take the run history with it."""
+    def big(**kwargs):
+        return {"content": "x" * 50_000}
+
+    logger = logging.getLogger("clip-result")
+    with caplog.at_level(logging.INFO, logger="clip-result"):
+        loop._dispatch_tool("big", {}, {"big": big}, logger)
+
+    line = caplog.text
+    assert len(line) < 5_000
+    assert "+48000 chars" in line
+
+
+def test_dispatch_log_clips_each_argument_separately(caplog):
+    """The page name is the part worth keeping, and it must survive however the
+    model happened to order the arguments."""
+    logger = logging.getLogger("clip-args")
+    args = {"content": "y" * 50_000, "name": "speakers-bureau"}
+    with caplog.at_level(logging.INFO, logger="clip-args"):
+        loop._dispatch_tool("write", args, {"write": lambda **kw: {"written": "ok"}}, logger)
+
+    assert "speakers-bureau" in caplog.text
+    assert len(caplog.text) < 5_000
+
+
+def test_dispatch_log_leaves_a_short_call_intact(caplog):
+    logger = logging.getLogger("clip-none")
+    with caplog.at_level(logging.INFO, logger="clip-none"):
+        loop._dispatch_tool("t", {"name": "a"}, {"t": lambda **kw: {"ok": True}}, logger)
+
+    assert "tool_call t({'name': 'a'}) -> {\"ok\": true}" in caplog.text
+    assert "chars]" not in caplog.text
 
 
 def test_dispatch_drops_extra_kwarg_for_fixed_signature():
