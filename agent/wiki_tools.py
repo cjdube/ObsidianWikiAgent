@@ -29,6 +29,13 @@ import re
 import sys
 from pathlib import Path
 
+from agent.wikilinks import (
+    delink_broken,
+    flatten_links,
+    link_target,
+    linked_page_names,
+)
+
 
 # The two files in wiki/ that Python owns rather than the model. Both are
 # reachable by name through write_wiki_page — _safe_page_path only checks the
@@ -430,58 +437,6 @@ def list_index_sections(vault_path: str) -> dict:
     return {"sections": sections}
 
 
-# A link target never contains a newline or a backtick, and never spans a code
-# span. Both exclusions come from one observed failure: a page whose body reads
-# "Unclosed `[[` brackets can cause the linter to swallow subsequent lines"
-# opened a match at the `[[` inside the backticks, ran past the real
-# [[obsidian-wiki-agent]] link that followed, and closed on its ]] — reporting a
-# broken link named "` brackets can cause the [[obsidian-wiki-agent" while the
-# genuine link went uncounted, which also makes its target look like an orphan.
-# Excluding backticks stops a code span's [[ from opening a match; excluding
-# newlines keeps one unclosed [[ from consuming the rest of the file.
-_LINK_RE = re.compile(r"\[\[([^\]\n`]+)\]\]")
-
-
-def _link_target(inner: str) -> str:
-    """The bare page stem a link body names — [[foo]], [[foo.md]], [[foo|alias]]
-    and [[foo#section]] all mean foo."""
-    name = inner.split("|", 1)[0].split("#", 1)[0].strip()
-    return name[:-3] if name.endswith(".md") else name
-
-
-def linked_page_names(content: str) -> set[str]:
-    """Page names already linked from index content, as bare stems."""
-    return {
-        name
-        for inner in _LINK_RE.findall(content)
-        if (name := _link_target(inner))
-    }
-
-
-def delink_broken(content: str, valid: set[str]) -> tuple[str, int]:
-    """Replace any [[link]] whose target is not a real page with its plain
-    display text, returning the cleaned content and the count de-linked.
-
-    The local model authors index links as free text and mistypes a few each
-    run (a dropped letter, a doubled hyphen, a since-deleted page), and nothing
-    else vets them before they reach disk. A [[target]] that resolves to no
-    page is a dead link — clicking it in Obsidian only offers to create an
-    empty page — so it is flattened to text (the alias if one was given, else
-    the target) rather than left to rot in the table of contents. Typos are
-    dropped, never guess-corrected: repointing [[cla-...]] at claude-... risks
-    linking the wrong page."""
-    count = 0
-
-    def repl(m: re.Match) -> str:
-        nonlocal count
-        if _link_target(m.group(1)) in valid:
-            return m.group(0)
-        count += 1
-        return m.group(1).split("|", 1)[-1].strip()
-
-    return _LINK_RE.sub(repl, content), count
-
-
 def _strip_unfiled(content: str) -> str:
     """Drop any previously appended Unfiled section so it is recomputed rather
     than accumulating. A page the model has since filed under a real heading
@@ -514,11 +469,10 @@ def _page_summary(vault_path: str, name: str) -> str:
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         if line.startswith("**Summary**:"):
             summary = line[len("**Summary**:"):].strip()
-            return re.sub(
-                r"\[\[([^\]]+)\]\]",
-                lambda m: m.group(1).split("|", 1)[-1].strip(),
-                summary,
-            )
+            # Every link, whatever it points at — this text is about to be
+            # re-embedded in index.md, where a surviving [[x]] would render as
+            # a real entry-description link.
+            return flatten_links(summary, lambda target: True)[0]
     return ""
 
 
@@ -526,11 +480,15 @@ _ENTRY_RE = re.compile(r"^- \[\[([^\]]+)\]\]\s*(.*)$")
 
 
 def _entry_name(line: str) -> str | None:
-    """The page a `- [[name]] description` line points at, or None."""
+    """The page a `- [[name]] description` line points at, or None.
+
+    _ENTRY_RE stays its own pattern rather than reusing LINK_RE: it matches the
+    *shape of an index entry line* — anchored, one link, description after —
+    not a link anywhere in a body. Only the target extraction is shared."""
     m = _ENTRY_RE.match(line)
     if not m:
         return None
-    return m.group(1).split("|", 1)[0].split("#", 1)[0].strip().removesuffix(".md")
+    return link_target(m.group(1))
 
 
 def _ensure_descriptions(vault_path: str, lines: list[str]) -> list[str]:

@@ -414,6 +414,44 @@ def test_apply_safe_fixes_strips_self_links(vault):
     assert any("a.md" in c for c in changes)
 
 
+def test_check_and_fix_agree_on_a_link_inside_a_code_span(vault):
+    """A complete [[a]] inside backticks is a link to both of them. The
+    backtick exclusion stops a stray `[[` from *opening* a runaway match; it
+    does not exempt a well-formed link that happens to sit in a code span, and
+    the link body here contains no backtick to exclude.
+
+    So the assertion is agreement, not exemption: the check reports it and the
+    fix repairs it. Those two used to run different patterns."""
+    vault.page("a", "# A\n\nThe `[[a]]` syntax links to a page.\n")
+    pages = wl._pages(vault.path)
+
+    assert any("links to itself" in f for f in wl.check_links(pages))
+
+    changes = wl.apply_safe_fixes(vault.path, pages)
+
+    assert any("a.md" in c for c in changes)
+    assert wl.check_links(wl._pages(vault.path)) == []
+
+
+def test_apply_safe_fixes_strips_a_self_link_after_a_stray_open_bracket(vault):
+    """The other half of the same disagreement: a stray `[[` in a code span
+    earlier in the body used to swallow the real self-link that followed, so
+    --fix reported no changes while check_links kept flagging it every run."""
+    vault.page("a", "# A\n\nUnclosed `[[` brackets are bad.\n\nSee [[a]] too.\n")
+    pages = wl._pages(vault.path)
+
+    assert any("links to itself" in f for f in wl.check_links(pages))
+
+    changes = wl.apply_safe_fixes(vault.path, pages)
+    content = (vault.root / "wiki" / "a.md").read_text()
+
+    assert "[[a]]" not in content
+    assert "`[[` brackets are bad" in content  # the code span is untouched
+    assert any("a.md" in c for c in changes)
+    # What the check reports and what the fix repairs now agree.
+    assert wl.check_links(wl._pages(vault.path)) == []
+
+
 def test_apply_safe_fixes_delinks_dead_index_links(vault):
     vault.page("real", good_page())
     vault.index("# Index\n\n- [[real]] keep me\n- [[ghost]] dead entry\n")

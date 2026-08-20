@@ -52,14 +52,18 @@ from agent.loop import run_agent
 from agent.notify import notify_failure
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
-    delink_broken,
     get_ingested_sources,
-    linked_page_names,
     list_binary_raw_files,
     list_raw_files,
     list_wiki_pages,
     query_dispatch,
     read_index,
+)
+from agent.wikilinks import (
+    LINK_RE,
+    delink_broken,
+    linked_page_names,
+    strip_links_to,
 )
 
 # Bounds for the --deep pass only. This is a scheduled unattended job against a
@@ -404,7 +408,6 @@ def check_duplicate_titles(pages: dict[str, str]) -> list[str]:
 # Names are blanked instead of comparing pages pairwise so this stays one pass
 # over the vault. Blanking every link target is what absorbs the asymmetry these
 # pairs always have: each twin links to the other, and to nothing else different.
-_LINK = re.compile(r"\[\[[^\]]+\]\]")
 _UPDATED_LINE = re.compile(r"^\*\*Last updated\*\*:.*$", re.MULTILINE)
 
 # Below this, a skeleton is too short to mean anything — two pages that are
@@ -418,7 +421,7 @@ def _skeleton(slug: str, content: str) -> str:
     (metadata, and the one field twins routinely differ on). What survives is the
     template the page was filled in from."""
     body = _UPDATED_LINE.sub("", content)
-    body = _LINK.sub("[[·]]", body)
+    body = LINK_RE.sub("[[·]]", body)
     title = _title(content) or ""
     names = {n for n in (slug, slug.replace("-", " "), title) if n}
     # Longest first, so "model fusion" is blanked before a bare "model" can
@@ -503,25 +506,6 @@ def structural_findings(
     }
 
 
-def _strip_self_links(content: str, slug: str) -> tuple[str, int]:
-    """De-link any link a page makes to itself, returning the cleaned content
-    and the count removed. A page linking to itself is never meaningful, so the
-    link is flattened to its plain display text (the alias if one was given)."""
-    count = 0
-
-    def repl(m: re.Match) -> str:
-        nonlocal count
-        target = m.group(1).split("|", 1)[0].split("#", 1)[0].strip()
-        if target.endswith(".md"):
-            target = target[:-3]
-        if target != slug:
-            return m.group(0)
-        count += 1
-        return m.group(1).split("|", 1)[-1].strip()
-
-    return re.sub(r"\[\[([^\]]+)\]\]", repl, content), count
-
-
 def apply_safe_fixes(vault_path: str, pages: dict[str, str]) -> list[str]:
     """Apply only the provably-safe, mechanical fixes and return a log of what
     changed. This is the one place wiki_lint writes to the vault, gated behind
@@ -532,12 +516,17 @@ def apply_safe_fixes(vault_path: str, pages: dict[str, str]) -> list[str]:
     Two fixes qualify as safe:
       1. Self-links — a page linking to itself is never meaningful.
       2. Dead index links — a table-of-contents entry pointing at no real page
-         (reusing the same de-linking the ingest guard applies)."""
+         (reusing the same de-linking the ingest guard applies).
+
+    Both go through agent/wikilinks.py, which is also what check_links reads
+    links with. That shared pattern is the point: this function writes to the
+    vault on the strength of what a check reported, so a fix that recognised
+    links the check did not could edit a page nobody was told about."""
     wiki_dir = Path(vault_path) / "wiki"
     changes: list[str] = []
 
     for slug in sorted(pages):
-        cleaned, n = _strip_self_links(pages[slug], slug)
+        cleaned, n = strip_links_to(pages[slug], slug)
         if n:
             (wiki_dir / f"{slug}.md").write_text(cleaned, encoding="utf-8")
             pages[slug] = cleaned
