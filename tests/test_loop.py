@@ -445,8 +445,8 @@ def test_measures_the_real_prompt_every_iteration(monkeypatch):
                    provider="ollama", logger=logger)
 
     sizes = [i for i in logger.infos if "prompt" in i]
-    assert "prompt 4000 tokens on iteration 1" in sizes[0]
-    assert "prompt 9000 tokens on iteration 2" in sizes[1]
+    assert "prompt reached 4000 tokens on iteration 1" in sizes[0]
+    assert "prompt reached 9000 tokens on iteration 2" in sizes[1]
     assert logger.warnings == []
 
 

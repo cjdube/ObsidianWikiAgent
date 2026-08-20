@@ -423,8 +423,12 @@ def _log_prompt_size(
         # Not every Ollama build reports it, and there is nothing to say if so.
         return
     fill = count / num_ctx
+    # "reached", not a bare count: the number is the size of the whole
+    # transcript being re-sent this turn, not tokens spent on this turn alone.
+    # Read as a running tally it invites the wrong fix — trimming one call's
+    # output — when what grows is everything the loop has carried since turn 1.
     message = (
-        f"prompt {count} tokens on iteration {iteration} "
+        f"prompt reached {count} tokens on iteration {iteration} "
         f"({fill:.0%} of num_ctx={num_ctx})"
     )
     if fill >= _CONTEXT_WARN_FRACTION:
