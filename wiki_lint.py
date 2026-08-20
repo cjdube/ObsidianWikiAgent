@@ -52,12 +52,12 @@ from agent.loop import run_agent
 from agent.notify import notify_failure
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
+    RawScan,
     get_ingested_sources,
-    list_binary_raw_files,
-    list_raw_files,
     list_wiki_pages,
     query_dispatch,
     read_index,
+    scan_raw,
 )
 from agent.wikilinks import (
     LINK_RE,
@@ -265,17 +265,22 @@ def check_slug_typos(pages: dict[str, str]) -> list[str]:
     return findings
 
 
-def check_format(vault_path: str, pages: dict[str, str], today: datetime.date) -> list[str]:
+def check_format(
+    vault_path: str,
+    pages: dict[str, str],
+    today: datetime.date,
+    scan: RawScan = None,
+) -> list[str]:
     """The page format RULES.md requires — the defect classes a weaker model
     reliably produces: slug-as-title, placeholder and future dates, and
     citations to sources that do not exist."""
-    # Binaries too: list_raw_files deliberately hides them from the *model*,
-    # but a citation's job is to point at a file that exists, and a PDF or
-    # screenshot in raw/ does. Checking against the readable set alone reported
-    # every page citing one as having invented the source — the same class of
-    # false positive _cited_sources was written to kill, through another door.
-    raw = set(list_raw_files(vault_path)["files"])
-    raw |= set(list_binary_raw_files(vault_path)["files"])
+    # Binaries too: the queue deliberately hides them from the *model*, but a
+    # citation's job is to point at a file that exists, and a PDF or screenshot
+    # in raw/ does. Checking against the readable set alone reported every page
+    # citing one as having invented the source — the same class of false
+    # positive _cited_sources was written to kill, through another door.
+    scan = scan or scan_raw(vault_path)
+    raw = set(scan.text) | set(scan.binary)
     findings = []
     for slug, content in sorted(pages.items()):
         title = _title(content)
@@ -450,7 +455,9 @@ def check_template_twins(pages: dict[str, str]) -> list[str]:
     ]
 
 
-def check_source_coverage(vault_path: str, pages: dict[str, str]) -> list[str]:
+def check_source_coverage(
+    vault_path: str, pages: dict[str, str], scan: RawScan = None
+) -> list[str]:
     """Dated sources the ingest recorded as done that produced no page of their
     own — the one thing RULES.md step 4 makes mandatory for a dated capture.
 
@@ -473,7 +480,7 @@ def check_source_coverage(vault_path: str, pages: dict[str, str]) -> list[str]:
     ingested = set(get_ingested_sources(vault_path))
     named = {_letters(slug) for slug in pages}
     findings = []
-    for name in sorted(list_raw_files(vault_path)["files"]):
+    for name in sorted((scan or scan_raw(vault_path)).text):
         stem = name.rsplit(".", 1)[0]
         if name not in ingested or not _DATED_LOG.search(stem):
             continue
@@ -490,15 +497,24 @@ def structural_findings(
     vault_path: str,
     today: datetime.date = None,
     pages: dict[str, str] = None,
+    scan: RawScan = None,
 ) -> dict[str, list[str]]:
+    """Every structural check, over one read of the pages and one walk of raw/.
+
+    `pages` and `scan` exist for the same reason: two checks each need the raw/
+    listing and every check needs the pages, and each used to fetch its own. A
+    lint therefore walked raw/ three times, probing every file for a NUL byte
+    each time.
+    """
     today = today or datetime.date.today()
     pages = _pages(vault_path) if pages is None else pages
+    scan = scan_raw(vault_path) if scan is None else scan
     return {
         "Broken and self links": check_links(pages),
         "Orphan pages": check_orphans(pages),
         "Index integrity": check_index(vault_path, pages),
-        "Source coverage": check_source_coverage(vault_path, pages),
-        "Page format": check_format(vault_path, pages, today),
+        "Source coverage": check_source_coverage(vault_path, pages, scan),
+        "Page format": check_format(vault_path, pages, today, scan),
         "Misspelled slugs": check_slug_typos(pages),
         "Duplicate titles": check_duplicate_titles(pages),
         "Template twins": check_template_twins(pages),

@@ -29,6 +29,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from agent.wikilinks import (
     delink_broken,
@@ -104,7 +105,67 @@ def _is_text_source(path: Path) -> bool:
         return False
 
 
-def list_raw_files(vault_path: str) -> dict:
+class RawScan(NamedTuple):
+    """One walk of raw/, classified every way anything here asks about it.
+
+    text:     readable sources by basename, OLDEST FIRST — the ingest queue.
+    binary:   the basenames _is_text_source refused, sorted.
+    unsorted: readable sources sitting directly in raw/, sorted — the sort
+              step's input.
+
+    These were three separate functions doing three separate walks, and each
+    walk probes every file (_is_text_source opens it and reads 8 KB looking for
+    a NUL byte). A lint asks for all three and so paid for the walk three times;
+    an ingest asks for all three too. Answering them from one pass is the whole
+    of this type's job.
+    """
+
+    text: list[str]
+    binary: list[str]
+    unsorted: list[str]
+
+
+def scan_raw(vault_path: str) -> RawScan:
+    """Walk raw/ once and classify what is in it. See RawScan.
+
+    Not cached: sort_raw_files moves files mid-run, so a scan taken before the
+    sort step does not describe the tree after it. Callers take a fresh one on
+    either side of a move and share it everywhere in between.
+    """
+    raw_dir = _raw_dir(vault_path)
+    if not raw_dir.exists():
+        return RawScan([], [], [])
+
+    # Keyed by basename (the .ingested.json identity), so a name appearing in
+    # two directories is one queue entry — dated by the older copy, which is how
+    # long that source has actually been waiting.
+    oldest: dict[str, float] = {}
+    binary: set[str] = set()
+    unsorted: list[str] = []
+
+    for p in raw_dir.rglob("*"):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        if not _is_text_source(p):
+            binary.add(p.name)
+            continue
+        if p.parent == raw_dir:
+            unsorted.append(p.name)
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if p.name not in oldest or mtime < oldest[p.name]:
+            oldest[p.name] = mtime
+
+    return RawScan(
+        text=[n for n, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))],
+        binary=sorted(binary),
+        unsorted=sorted(unsorted),
+    )
+
+
+def list_raw_files(vault_path: str, scan: RawScan = None) -> dict:
     """Every raw source the ingest can read, by basename, wherever it sits
     under raw/.
 
@@ -124,38 +185,18 @@ def list_raw_files(vault_path: str) -> dict:
     behind Daily-Chrome-* and AI-Chat-Learnings-*, because each day added two
     sources that sorted ahead of it and the run only ever reached two. FIFO
     cannot do that: waiting longest is exactly what earns a source its turn.
-    Ties break on name so the order stays deterministic."""
-    raw_dir = _raw_dir(vault_path)
-    if not raw_dir.exists():
-        return {"files": []}
-    # Keyed by basename (the .ingested.json identity), so a name appearing in
-    # two directories is one queue entry — dated by the older copy, which is how
-    # long that source has actually been waiting.
-    oldest: dict[str, float] = {}
-    for p in raw_dir.rglob("*"):
-        if not p.is_file() or p.name.startswith(".") or not _is_text_source(p):
-            continue
-        try:
-            mtime = p.stat().st_mtime
-        except OSError:
-            continue
-        if p.name not in oldest or mtime < oldest[p.name]:
-            oldest[p.name] = mtime
-    return {"files": [name for name, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))]}
+    Ties break on name so the order stays deterministic.
+
+    `scan` lets a caller that has already walked raw/ hand that work over
+    instead of paying for it twice; it is taken here when omitted."""
+    return {"files": (scan or scan_raw(vault_path)).text}
 
 
-def list_binary_raw_files(vault_path: str) -> dict:
+def list_binary_raw_files(vault_path: str, scan: RawScan = None) -> dict:
     """The raw files list_raw_files refuses to hand the model. Surfaced so a
     run can say which sources it ignored — a screenshot or PDF put in raw/ was
     meant to be a source, and needs OCR or a vision model, not silence."""
-    raw_dir = _raw_dir(vault_path)
-    if not raw_dir.exists():
-        return {"files": []}
-    names = {
-        p.name for p in raw_dir.rglob("*")
-        if p.is_file() and not p.name.startswith(".") and not _is_text_source(p)
-    }
-    return {"files": sorted(names)}
+    return {"files": (scan or scan_raw(vault_path)).binary}
 
 
 def read_raw_file(vault_path: str, filename: str) -> dict:
@@ -181,7 +222,7 @@ def read_raw_file(vault_path: str, filename: str) -> dict:
         return {"error": str(e)}
 
 
-def list_unsorted_raw_files(vault_path: str) -> dict:
+def list_unsorted_raw_files(vault_path: str, scan: RawScan = None) -> dict:
     """Files sitting directly in raw/, i.e. dropped in but not yet sorted into
     one of the vault's subdirectories. These are the sort step's input.
 
@@ -189,14 +230,7 @@ def list_unsorted_raw_files(vault_path: str) -> dict:
     start of it, so handing it a PNG asks the model to pick a folder from
     binary noise — the same guess-from-the-filename that fabricated content
     downstream, just earlier in the run."""
-    raw_dir = _raw_dir(vault_path)
-    if not raw_dir.exists():
-        return {"files": []}
-    files = sorted(
-        p.name for p in raw_dir.iterdir()
-        if p.is_file() and not p.name.startswith(".") and _is_text_source(p)
-    )
-    return {"files": files}
+    return {"files": (scan or scan_raw(vault_path)).unsorted}
 
 
 def move_raw_file(vault_path: str, filename: str, folder: str) -> dict:

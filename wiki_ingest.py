@@ -38,6 +38,7 @@ from agent.wiki_tools import (
     read_index,
     read_raw_file,
     read_wiki_page,
+    scan_raw,
     update_index,
     write_wiki_page,
 )
@@ -303,14 +304,18 @@ def ingest_vault(vault_path: str, logger) -> int:
     # and LocalLLMAgent's log_inspector reports every WARNING it finds. That is
     # the same reasoning wiki_lint applies to its own findings: something you
     # read, not something that should page you.
-    binaries = list_binary_raw_files(vault_path).get("files", [])
+    # One walk of raw/, taken after the sort step has finished moving things,
+    # and shared by both listings below. They used to walk it once each.
+    scan = scan_raw(vault_path)
+
+    binaries = list_binary_raw_files(vault_path, scan).get("files", [])
     if binaries:
         logger.info(
             f"Skipping {len(binaries)} binary source(s) in raw/ — these need OCR "
             f"or a vision model, not a text read: {', '.join(binaries)}"
         )
 
-    raw_files = list_raw_files(vault_path).get("files", [])
+    raw_files = list_raw_files(vault_path, scan).get("files", [])
     already_ingested = set(get_ingested_sources(vault_path))
     pending = [f for f in raw_files if f not in already_ingested]
 

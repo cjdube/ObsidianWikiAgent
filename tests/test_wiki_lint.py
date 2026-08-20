@@ -315,6 +315,21 @@ def test_check_template_twins_ignores_pages_too_short_to_judge():
 # --- structural_findings + exit code ---------------------------------------
 
 
+def test_structural_findings_walks_raw_only_once(vault, monkeypatch):
+    """check_source_coverage and check_format both need the raw/ listing, and
+    check_format needs it twice over (readable plus binary). Each used to fetch
+    its own, so a lint probed every file in raw/ for a NUL byte three times."""
+    vault.raw("note.txt")
+    vault.page("a", good_page())
+    calls = []
+    real = wl.scan_raw
+    monkeypatch.setattr(wl, "scan_raw", lambda p: calls.append(p) or real(p))
+
+    wl.structural_findings(vault.path, today=TODAY)
+
+    assert len(calls) == 1
+
+
 def test_structural_findings_accepts_prebuilt_pages(vault):
     vault.page("orphan", good_page())
     pages = wl._pages(vault.path)

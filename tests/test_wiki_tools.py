@@ -510,6 +510,38 @@ def test_list_unsorted_raw_files_excludes_binaries(vault):
     assert wt.list_unsorted_raw_files(vault.path)["files"] == ["top.txt"]
 
 
+def test_scan_raw_classifies_every_way_in_one_walk(vault):
+    """The three listings are three views of one walk, not three walks."""
+    vault.raw("top.txt")
+    vault.raw("nested.txt", subdir="daily-notes")
+    _png(vault, "a.png")
+    _png(vault, "b.pdf", subdir="misc")
+
+    scan = wt.scan_raw(vault.path)
+
+    assert set(scan.text) == {"top.txt", "nested.txt"}
+    assert scan.binary == ["a.png", "b.pdf"]
+    assert scan.unsorted == ["top.txt"]
+    # And the views agree with taking each listing on its own.
+    assert wt.list_raw_files(vault.path, scan) == wt.list_raw_files(vault.path)
+    assert wt.list_binary_raw_files(vault.path, scan) == wt.list_binary_raw_files(vault.path)
+    assert wt.list_unsorted_raw_files(vault.path, scan) == wt.list_unsorted_raw_files(vault.path)
+
+
+def test_scan_raw_probes_each_file_once(vault):
+    vault.raw("a.txt")
+    vault.raw("b.txt", subdir="daily-notes")
+    _png(vault, "c.png")
+    probed = []
+    original = wt._is_text_source
+    wt._is_text_source = lambda p: probed.append(p.name) or original(p)
+    try:
+        wt.scan_raw(vault.path)
+    finally:
+        wt._is_text_source = original
+    assert sorted(probed) == ["a.txt", "b.txt", "c.png"]
+
+
 def test_binary_detection_ignores_extension(vault):
     # Extension allowlists miss mislabelled files; the NUL byte does not.
     (vault.root / "raw" / "sneaky.md").write_bytes(b"# Title\x00\x00binary")
