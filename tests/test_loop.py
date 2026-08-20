@@ -190,8 +190,30 @@ def test_to_function_declarations_drops_empty_parameters():
 # --- _post_with_retry ------------------------------------------------------
 
 
+def test_gemini_calls_honour_their_own_timeout(monkeypatch):
+    """The Ollama path has honoured OLLAMA_TIMEOUT all along; this one took
+    _post_with_retry's hardcoded 120 with no way to change it."""
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setenv("GEMINI_TIMEOUT", "900")
+    seen = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        seen["timeout"] = timeout
+        return FakeResp(200, json_data={"candidates": [{"content": {"parts": [{"text": "hi"}]}}]})
+
+    monkeypatch.setattr(loop._session, "post", fake_post)
+    loop.run_agent("s", "u", tools=[], dispatch={}, provider="gemini")
+    assert seen["timeout"] == 900
+
+
+def test_gemini_timeout_defaults_when_unset(monkeypatch):
+    monkeypatch.delenv("GEMINI_TIMEOUT", raising=False)
+    assert loop._gemini_timeout() == 120
+
+
 def test_post_with_retry_success(monkeypatch):
-    monkeypatch.setattr(loop.requests, "post", _sequenced([FakeResp(200, json_data={"ok": 1})]))
+    monkeypatch.setattr(loop._session, "post", _sequenced([FakeResp(200, json_data={"ok": 1})]))
     resp = loop._post_with_retry("http://x", {})
     assert resp.json() == {"ok": 1}
 
@@ -199,7 +221,7 @@ def test_post_with_retry_success(monkeypatch):
 def test_post_with_retry_retries_on_429(monkeypatch):
     monkeypatch.setattr(loop.time, "sleep", lambda s: None)
     monkeypatch.setattr(
-        loop.requests, "post",
+        loop._session, "post",
         _sequenced([FakeResp(429, headers={"Retry-After": "0"}), FakeResp(200, json_data={"ok": 2})]),
     )
     resp = loop._post_with_retry("http://x", {})
@@ -209,7 +231,7 @@ def test_post_with_retry_retries_on_429(monkeypatch):
 def test_post_with_retry_retries_network_error(monkeypatch):
     monkeypatch.setattr(loop.time, "sleep", lambda s: None)
     monkeypatch.setattr(
-        loop.requests, "post",
+        loop._session, "post",
         _sequenced([requests.exceptions.ConnectionError("boom"), FakeResp(200, json_data={"ok": 3})]),
     )
     resp = loop._post_with_retry("http://x", {})
@@ -218,7 +240,7 @@ def test_post_with_retry_retries_network_error(monkeypatch):
 
 def test_post_with_retry_gives_up(monkeypatch):
     monkeypatch.setattr(loop.time, "sleep", lambda s: None)
-    monkeypatch.setattr(loop.requests, "post", _sequenced([FakeResp(503)] * loop._MAX_HTTP_ATTEMPTS))
+    monkeypatch.setattr(loop._session, "post", _sequenced([FakeResp(503)] * loop._MAX_HTTP_ATTEMPTS))
     try:
         loop._post_with_retry("http://x", {})
         assert False, "expected HTTPError"

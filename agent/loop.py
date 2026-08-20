@@ -36,6 +36,12 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
 _RETRY_STATUSES = (429, 500, 502, 503, 504)
 _MAX_HTTP_ATTEMPTS = 5
 
+# One connection pool for the process. A run is dozens of calls to the same host
+# — 30 iterations per source, per source — and every requests.post() opened a
+# fresh connection for each. Against localhost that is noise; against Gemini it
+# is a TLS handshake per call. Single-threaded, so a shared Session is safe.
+_session = requests.Session()
+
 
 def _provider(explicit: Optional[str] = None) -> str:
     name = (explicit or os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
@@ -186,7 +192,7 @@ def _post_with_retry(
     for attempt in range(1, _MAX_HTTP_ATTEMPTS + 1):
         budget.check("model request")
         try:
-            resp = requests.post(
+            resp = _session.post(
                 url, json=payload, headers=headers,
                 timeout=budget.clamp_timeout(timeout),
             )
@@ -460,6 +466,14 @@ def _gemini_key() -> str:
     return key
 
 
+def _gemini_timeout() -> int:
+    """Seconds to wait on one Gemini call. The Ollama path has honoured
+    OLLAMA_TIMEOUT all along while this one took _post_with_retry's hardcoded
+    120 — and the slowest call in the repo is the --deep judgment pass, which
+    reads the whole index."""
+    return int(os.getenv("GEMINI_TIMEOUT", "120"))
+
+
 def _gemini_model(explicit: Optional[str] = None) -> str:
     model = explicit or os.getenv("GEMINI_MODEL")
     if not model:
@@ -510,7 +524,11 @@ def _run_gemini(
 
     for iteration in range(max_iterations):
         resp = _post_with_retry(
-            url, {**payload_base, "contents": contents}, headers=headers, logger=logger
+            url,
+            {**payload_base, "contents": contents},
+            headers=headers,
+            timeout=_gemini_timeout(),
+            logger=logger,
         )
         data = resp.json()
 
@@ -564,6 +582,7 @@ def complete_text(
                 "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             },
             headers={"x-goog-api-key": _gemini_key()},
+            timeout=_gemini_timeout(),
         )
         candidates = resp.json().get("candidates") or []
         if not candidates:
@@ -599,7 +618,7 @@ def list_gemini_models() -> list[str]:
     Model availability moves faster than this code; ask the API rather than
     hardcoding an id that may not exist.
     """
-    resp = requests.get(
+    resp = _session.get(
         f"{GEMINI_ENDPOINT}/models",
         headers={"x-goog-api-key": _gemini_key()},
         timeout=30,

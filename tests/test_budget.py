@@ -109,7 +109,7 @@ def test_post_with_retry_stops_when_the_ceiling_is_spent(monkeypatch):
         attempts.append(1)
         raise requests.exceptions.ReadTimeout("wedged")
 
-    monkeypatch.setattr(loop.requests, "post", fake_post)
+    monkeypatch.setattr(loop._session, "post", fake_post)
     budget.start_source("a-source.md", max_retries=2)
 
     try:
@@ -123,7 +123,7 @@ def test_post_with_retry_stops_when_the_ceiling_is_spent(monkeypatch):
 def test_post_with_retry_stops_when_the_deadline_passes(monkeypatch):
     monkeypatch.setattr(loop.time, "sleep", lambda s: None)
     monkeypatch.setattr(
-        loop.requests, "post",
+        loop._session, "post",
         _sequenced([requests.exceptions.ReadTimeout("wedged")] * loop._MAX_HTTP_ATTEMPTS),
     )
     budget.start_run(-1)
@@ -142,7 +142,7 @@ def test_post_with_retry_clamps_the_request_timeout(monkeypatch):
         seen["timeout"] = timeout
         return FakeResp(200, json_data={"ok": 1})
 
-    monkeypatch.setattr(loop.requests, "post", fake_post)
+    monkeypatch.setattr(loop._session, "post", fake_post)
     budget.start_run(10)
     loop._post_with_retry("http://x", {}, timeout=600)
     assert seen["timeout"] <= 10
@@ -198,7 +198,7 @@ def test_an_ordinary_tool_failure_is_still_reported_to_the_model():
 def test_healthy_run_is_untouched_by_a_generous_budget(monkeypatch):
     monkeypatch.setattr(loop.time, "sleep", lambda s: None)
     monkeypatch.setattr(
-        loop.requests, "post",
+        loop._session, "post",
         _sequenced([FakeResp(503), FakeResp(200, json_data={"ok": 1})]),
     )
     budget.start_run(600)
