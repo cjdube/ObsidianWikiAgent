@@ -6,14 +6,13 @@
      the placeholders, then follow the README's "Adding a new vault" steps.
 
      Placeholders to replace:
-       <YOUR_PREFIX>            reverse-DNS label prefix of your choosing
        <ABSOLUTE_PATH_TO_REPO>  where you cloned this repo
        <VAULT_NAME>             short name for the vault (e.g. learnings)
        <ABSOLUTE_PATH_TO_VAULT> the vault directory the job is pointed at -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.<YOUR_PREFIX>.wikiagent.<VAULT_NAME>-ingest</string>
+    <string>local.wikiagent.<VAULT_NAME>-ingest</string>
 
     <key>ProgramArguments</key>
     <array>
