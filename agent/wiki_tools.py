@@ -25,6 +25,7 @@ import argparse
 import functools
 import glob
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -672,23 +673,56 @@ def append_log(vault_path: str, entry: str) -> dict:
 
 
 def get_ingested_sources(vault_path: str) -> list[str]:
+    """The raw filenames already processed, from the vault's ledger.
+
+    A missing ledger is an empty one — that is simply a vault nothing has
+    ingested yet. An unreadable one is not, and used to be treated as the same
+    thing. That reading is the worst available: [] means "no source has ever
+    been ingested", so the next run re-ingests every file in raw/ — hundreds of
+    model calls, every page rewritten from scratch, and a duplicate log.md entry
+    for each. check_source_coverage cannot flag it either, since it reads this
+    same empty list. Refuse instead, and let the caller's failure alert say so.
+    """
     path = _wiki_dir(vault_path) / ".ingested.json"
     if not path.is_file():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
+        sources = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        raise RuntimeError(
+            f"{path} is unreadable ({e}) — refusing to read it as an empty "
+            f"ledger, which would re-ingest every source in raw/. Restore it "
+            f"from a vault snapshot, or delete it if a full re-ingest is "
+            f"genuinely what you want."
+        ) from e
+    if not isinstance(sources, list):
+        raise RuntimeError(
+            f"{path} holds {type(sources).__name__}, not a JSON list of "
+            f"filenames — restore it from a vault snapshot."
+        )
+    return sources
 
 
 def mark_ingested(vault_path: str, filename: str) -> None:
+    """Record a source as processed, atomically.
+
+    Written to a sibling and renamed over the ledger rather than written in
+    place, because write_text truncates before it writes: a crash in that gap
+    leaves a file that parses as nothing. The gap is not hypothetical — the
+    watchdog in agent/budget.py raises from a signal handler at whatever point
+    the process happens to be, so every run that overruns its budget can land
+    in it. os.replace is atomic, so the ledger is either the old list or the
+    new one and never a half of either.
+    """
     wiki_dir = _wiki_dir(vault_path)
     wiki_dir.mkdir(parents=True, exist_ok=True)
     path = wiki_dir / ".ingested.json"
     sources = get_ingested_sources(vault_path)
     if filename not in sources:
         sources.append(filename)
-    path.write_text(json.dumps(sources, indent=2), encoding="utf-8")
+    tmp = path.parent / f"{path.name}.tmp"
+    tmp.write_text(json.dumps(sources, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 READ_RAW_FILE_SCHEMA = {

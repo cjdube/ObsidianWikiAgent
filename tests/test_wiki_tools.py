@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -523,9 +524,18 @@ def test_get_ingested_sources_missing_file(vault):
     assert wt.get_ingested_sources(vault.path) == []
 
 
-def test_get_ingested_sources_corrupt_json(vault):
+def test_get_ingested_sources_refuses_corrupt_json(vault):
+    """[] here would mean "nothing has ever been ingested" and re-ingest the
+    whole of raw/. A truncated ledger is exactly what a crash mid-write leaves."""
     (vault.root / "wiki" / ".ingested.json").write_text("{not json", encoding="utf-8")
-    assert wt.get_ingested_sources(vault.path) == []
+    with pytest.raises(RuntimeError, match="unreadable"):
+        wt.get_ingested_sources(vault.path)
+
+
+def test_get_ingested_sources_refuses_a_non_list(vault):
+    (vault.root / "wiki" / ".ingested.json").write_text('{"a": 1}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="not a JSON list"):
+        wt.get_ingested_sources(vault.path)
 
 
 def test_mark_ingested_dedups(vault):
@@ -534,6 +544,31 @@ def test_mark_ingested_dedups(vault):
     wt.mark_ingested(vault.path, "b.txt")
     stored = json.loads((vault.root / "wiki" / ".ingested.json").read_text())
     assert stored == ["a.txt", "b.txt"]
+
+
+def test_mark_ingested_leaves_no_temp_file_behind(vault):
+    wt.mark_ingested(vault.path, "a.txt")
+    assert [p.name for p in (vault.root / "wiki").iterdir()] == [".ingested.json"]
+
+
+def test_mark_ingested_never_leaves_a_half_written_ledger(vault, monkeypatch):
+    """The ledger must be the old list or the new one, never a truncated file
+    that parses as nothing. write_text truncates first, so the rename is what
+    buys this."""
+    wt.mark_ingested(vault.path, "a.txt")
+
+    real_write = Path.write_text
+
+    def die_mid_write(self, *args, **kwargs):
+        real_write(self, *args, **kwargs)
+        raise RuntimeError("watchdog fired")
+
+    monkeypatch.setattr(Path, "write_text", die_mid_write)
+    with pytest.raises(RuntimeError, match="watchdog"):
+        wt.mark_ingested(vault.path, "b.txt")
+
+    monkeypatch.undo()
+    assert wt.get_ingested_sources(vault.path) == ["a.txt"]
 
 
 # --- write_wiki_page -------------------------------------------------------
