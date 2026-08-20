@@ -108,6 +108,16 @@ def _dispatch_tool(
             if not takes_var_kwargs:
                 fn_args = {k: v for k, v in fn_args.items() if k in params}
             result = fn(**fn_args)
+        except budget.BudgetExceeded:
+            # The run is over, not this tool call. Reported back to the model as
+            # a tool error it would be swallowed twice over: the loop would keep
+            # going, and the SIGALRM watchdog that raised it is one-shot
+            # (agent/budget.py), so it can never fire again — leaving only the
+            # cooperative checks it exists to backstop. That matters here
+            # specifically because the failure the watchdog was written for is a
+            # blocking read() (2026-08-13, 433 minutes behind a macOS consent
+            # prompt), and every file read in a run happens inside this call.
+            raise
         except Exception as e:
             result = {"error": f"tool '{fn_name}' raised: {e}"}
     if logger:

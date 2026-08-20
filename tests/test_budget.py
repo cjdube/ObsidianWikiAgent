@@ -148,6 +148,53 @@ def test_post_with_retry_clamps_the_request_timeout(monkeypatch):
     assert seen["timeout"] <= 10
 
 
+# --- integration with _dispatch_tool ---------------------------------------
+
+
+def test_dispatch_does_not_demote_the_budget_to_a_tool_error():
+    """_dispatch_tool reports a failing tool back to the model instead of
+    killing the run, which is right for every exception except this one. The
+    watchdog fires wherever the process happens to be, and a file read — the
+    2026-08-13 blocking read() — happens inside exactly this call."""
+    def wedged(**kwargs):
+        raise budget.BudgetExceeded("run budget of 45 min expired")
+
+    try:
+        loop._dispatch_tool("wedged", {}, {"wedged": wedged}, None)
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded:
+        pass
+
+
+def test_budget_from_a_tool_call_ends_the_whole_loop(monkeypatch):
+    """And it must reach the caller, not just leave _dispatch_tool: the loop
+    would otherwise run on with the one-shot watchdog already spent."""
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data={
+            "message": {"tool_calls": [{"function": {"name": "t", "arguments": {}}}]}
+        }),
+    )
+
+    def wedged(**kwargs):
+        raise budget.BudgetExceeded("run budget of 45 min expired")
+
+    try:
+        loop.run_agent("sys", "user", tools=[], dispatch={"t": wedged}, provider="ollama")
+        assert False, "expected BudgetExceeded"
+    except budget.BudgetExceeded:
+        pass
+
+
+def test_an_ordinary_tool_failure_is_still_reported_to_the_model():
+    """The guard above must not turn every tool error into a dead run."""
+    def boom(**kwargs):
+        raise RuntimeError("kaboom")
+
+    result = loop._dispatch_tool("boom", {}, {"boom": boom}, None)
+    assert "kaboom" in result["error"]
+
+
 def test_healthy_run_is_untouched_by_a_generous_budget(monkeypatch):
     monkeypatch.setattr(loop.time, "sleep", lambda s: None)
     monkeypatch.setattr(
