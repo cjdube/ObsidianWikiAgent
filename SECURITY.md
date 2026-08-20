@@ -45,8 +45,12 @@ What contains it: `_safe_page_path` and `_safe_raw_path` in
 landing outside `<vault>/wiki` and `<vault>/raw`. Both are tested directly
 against `../`, `../../etc/passwd` and absolute paths; because they compare
 against `.resolve()`d paths, a symlink pointing out of the vault is caught by
-the same check. The seven exposed tools are all vault file I/O — no shell, no
-network, and no path argument that bypasses those two guards.
+the same check. The exposed tools are all vault file I/O — no shell, no
+network, and no path argument that bypasses those two guards. (Seven are
+advertised in `INGEST_TOOL_SCHEMAS`; the ingest dispatch resolves an eighth,
+`read_index`, which is deliberately callable-but-unadvertised so a vault's
+`RULES.md` naming it in prose still works. It is a read, and it is inside the
+same guards.)
 
 `write_wiki_page` additionally refuses the two filenames Python owns,
 `index.md` and `log.md` (`RESERVED` in `agent/wiki_tools.py`). Both sit inside

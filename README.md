@@ -160,6 +160,14 @@ Once a vault is set up and scheduled, this is the actual workflow:
 1. **Drop raw material into `<vault>/raw/`.** Notes, transcripts, exported
    docs — whatever the vault ingests. That's the only manual step; you
    don't organize it or tell the agent it's there.
+
+   Text sources only. A binary — a PDF, a screenshot, anything with a NUL byte
+   in its first 8 KB — is skipped rather than decoded, and the run logs which
+   ones it skipped. That is deliberate: a PNG read as text returns hundreds of
+   thousands of replacement characters, and the model then writes what the
+   *filename* implies and cites the file for every claim (see `_is_text_source`
+   in `agent/wiki_tools.py`). OCR it first, or transcribe it, then drop the
+   text in.
 2. **Ingestion runs on its own schedule** (the vault's launchd `.plist`).
    To see it happen right away instead of waiting — e.g. just after
    dropping a file in — trigger it on demand:
@@ -177,11 +185,15 @@ Once a vault is set up and scheduled, this is the actual workflow:
    produced it. `logs/wiki_ingest.<vault-name>.log` is the record Python
    writes — one line per tool call, with its arguments and result — and it is
    what to read when a run's behaviour is actually in question. A source is
-   only marked done once it actually
-   writes pages; if the local model reads a file but returns without writing
-   (a transient no-op that happens on dense sources), the run re-attempts it
-   a few times, then leaves it for the next scheduled run — so a stuck file
-   clears itself without intervention.
+   only marked done once a write actually lands — a page write, or the
+   `log.md` entry that closes out the source. If the local model reads a file
+   but returns without writing anything at all (a transient no-op that happens
+   on dense sources), the run re-attempts it a few times, then leaves it for
+   the next scheduled run — so a stuck file clears itself without intervention.
+
+   Note the gap that leaves: a run that wrote *some* pages and then died still
+   counts as done and is never retried. That is the hole `wiki_lint.py`'s
+   source-coverage check exists to report after the fact — see step 6.
 4. **Browse the result in Obsidian.** `<vault>/wiki/` is plain markdown —
    open the vault normally in the Obsidian app and start from
    `wiki/index.md`, the table of contents the agent maintains.
@@ -219,6 +231,23 @@ Once a vault is set up and scheduled, this is the actual workflow:
    and it is deliberately narrow — every judgment call (which of two
    overlapping pages survives, whether an orphan earns its page, a bad date, an
    invented citation) is left for you.
+
+   Add `--json` to get the structural findings as one JSON object on stdout
+   instead of prose, for a caller that renders its own UI (LocalLLMAgent's
+   `/wiki/lint` view shells out to exactly this):
+
+   ```bash
+   .venv/bin/python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --json
+   ```
+
+   Structural pass only, and it deliberately writes no log — this path is
+   driven by a button, and a click that logged "Starting wiki lint run" would
+   invent a scheduled run that never happened in the file the dashboard parses
+   for run history. `--deep` is refused rather than ignored, since a page load
+   cannot wait on a multi-minute model conversation. `--fix` *is* honoured, so
+   `--json --fix` writes to the vault like the prose path does. The exit code
+   means the same thing either way: 1 means findings exist, not that the run
+   failed.
 
    A vault can audit itself on a schedule too, with a lint plist you write the
    same way as an ingest one (there is no lint template — copy

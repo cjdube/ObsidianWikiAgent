@@ -1,4 +1,8 @@
-"""Shared helpers for the ingest/query entrypoints."""
+"""Shared helpers for the scheduled entrypoints — ingest, lint, and snapshot.
+
+Not wiki_query.py: that one is manual and interactive, so it neither writes a
+structured log nor has a launchd log to cap.
+"""
 
 import logging
 import os
