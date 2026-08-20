@@ -362,8 +362,8 @@ def check_lens_frontmatter(pages: dict[str, str]) -> list[str]:
     the `lens: true` marker that makes them one.
 
     Dated logs are exempt (see _DATED_LOG). A lens is a concept page a human
-    authored; a dated capture is a record of one day, and RULES.md step 4 names
-    it after its source rather than after any concept. So a dated page can only
+    authored; a dated capture is a record of one day, and RULES.md's "What earns
+    a page" names it after its source rather than after any concept. So a dated page can only
     ever *mention* the tool — ai-chat-learnings-2026-08-03.md was reported for
     the line "Updated `docs/tool-loading.md` to include `evaluate_against` in
     the `web` group", which is a note about a day's work, not a self-description.
@@ -459,15 +459,22 @@ def check_source_coverage(
     vault_path: str, pages: dict[str, str], scan: RawScan = None
 ) -> list[str]:
     """Dated sources the ingest recorded as done that produced no page of their
-    own — the one thing RULES.md step 4 makes mandatory for a dated capture.
+    own — the one thing RULES.md's "What earns a page" makes mandatory for a
+    dated capture.
 
-    _ingest_source marks a source ingested as soon as *any* write lands, so a
-    run that wrote one topic page and stopped is indistinguishable from one that
-    did the whole job, and .ingested.json then guarantees it is never retried.
-    Observed 2026-08-03: AI-Chat-Learnings-2026-08-03.md was marked done having
-    written 3 of its 8 sessions into topic pages, with no dated page and no
-    log.md entry at all. Two sessions' material is simply absent from the vault,
-    and nothing reported it for two weeks.
+    _ingest_source used to mark a source ingested as soon as *any* write landed,
+    so a run that wrote one topic page and stopped was indistinguishable from one
+    that did the whole job, and .ingested.json then guaranteed it was never
+    retried. Observed 2026-08-03: AI-Chat-Learnings-2026-08-03.md was marked done
+    having written 3 of its 8 sessions into topic pages, with no dated page and
+    no log.md entry at all. Two sessions' material is simply absent from the
+    vault, and nothing reported it for two weeks.
+
+    The staged ingest closed that hole at the source — it plans the page set up
+    front and marks a source only when every planned page landed. This check
+    stays because it is the backstop for the case the plan itself is wrong: a
+    stage 1 that never proposes the dated page produces a "complete" run with the
+    same gap, and only a rule that knows the page must exist can see it.
 
     The dated page is the check because it is the only per-source artefact whose
     name is knowable in advance. Topic pages vary by content and cannot be

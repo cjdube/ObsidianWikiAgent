@@ -35,17 +35,46 @@ and this repo runs standalone without it.
 ```
 launchd (per-vault .plist, timed)
    -> python wiki_ingest.py --vault <path>
-       -> reads <vault>/RULES.md as the system prompt
+       -> reads <vault>/RULES.md for the vault's policy (scope, page
+          format, citations); the ingest procedure lives in wiki_ingest.py
        -> sorts freshly dropped raw/ files into the subdirectories the
           vault declares under "## Raw folders" (local model picks the
           folder per file; no-op for vaults that declare none)
        -> finds raw/ sources not yet in wiki/.ingested.json, OLDEST FIRST
-       -> for each: tool-calling loop against Ollama's /api/chat
-          (read_raw_file, list_wiki_pages, read/write_wiki_page,
-           list_index_sections, update_index, append_log) files it into
-           wiki/, unattended
-       -> marks it ingested, logs everything to logs/wiki_ingest.<vault>.log
+       -> for each source, three stages, each its OWN conversation:
+          1. plan    read_raw_file, list_wiki_pages,
+                     list_index_sections -> submit_plan
+                     (decides which pages to touch; writes nothing)
+          2. execute one conversation PER PLANNED PAGE — read_raw_file,
+                     read_wiki_page, write_wiki_page, update_index
+          3. log     append_log, once, for the whole source
+       -> marks it ingested only if every planned page landed, and logs
+          everything to logs/wiki_ingest.<vault>.log
 ```
+
+### Why the ingest is three stages and not one loop
+
+One source used to be one conversation. The model keeps nothing between calls,
+so the whole transcript is re-sent every turn, and every tool result stays in it
+for the rest of the source. Measured on 2026-08-20, one source over 25 turns
+peaked at 27,528 tokens — 84% of a 32,768 window, with 33 warnings. 74% of that
+peak was material already on disk: 5,590 tokens listing all 418 page names, 7,490
+re-sending three pages it had finished reading, 7,330 re-sending nine pages it
+had already written.
+
+Splitting it makes the cost per page flat. Planning peaks around 15k, and each
+page's own conversation around 10–11k regardless of how many pages the source
+touches — which matters because RULES.md puts 10–15 pages per source at normal,
+and the page list grows with the vault forever.
+
+Two rules need cross-page awareness and would break in isolated conversations:
+links must point both ways, and one idea must not become two pages in a single
+run. Each stage-2 prompt therefore carries every page name in the batch — about
+150 tokens, against the ~7,500 that reading those pages cost when they shared one
+context.
+
+`--plan-only` runs stage 1 for every pending source and prints what it would do.
+Stage 1 has no tool that writes, so this cannot touch the vault.
 
 ### Two rules the ingest queue and index depend on
 
@@ -88,7 +117,8 @@ differs; each provider owns its own request/history translation and they share
 the tool-dispatch step.
 
 The 6-iteration cap is only the default for callers that don't say otherwise —
-`wiki_ingest.py` raises it to 30 (one source can touch 10–15 pages),
+`wiki_ingest.py` sets 8 for its plan and execute stages and 4 for its log stage
+(each is a short conversation with one job),
 `wiki_lint.py --deep` to 60, and `wiki_query.py` to 15 (the index plus several
 pages). A loop that runs out of turns returns a `[incomplete: …]` marker rather
 than an answer; `wiki_query.py` exits non-zero when it sees one, so a truncated
@@ -217,11 +247,12 @@ Once a vault is set up and scheduled, this is the actual workflow:
    lens integrity) run in Python, so they are instant, free, and cannot miss a
    page. Exits non-zero when it finds something.
 
-   Source coverage is the one that catches an ingest that stopped early: a
-   source is recorded in `wiki/.ingested.json` as soon as any write lands, so a
-   run that wrote one page and died is never retried. A dated capture that owes
-   a page named after it and does not have one is reported here. Re-run it by
-   removing its name from `wiki/.ingested.json`.
+   Source coverage catches an ingest that stopped early. The staged ingest
+   already marks a source done only when every page it planned actually landed,
+   so the old failure — marked complete on the strength of one write — cannot
+   happen any more. This is the backstop for the case the *plan* was wrong: a
+   dated capture that owes a page named after it and does not have one is
+   reported here. Re-run it by removing its name from `wiki/.ingested.json`.
 
    Add `--deep` for the checks code can't do — contradictions between pages,
    one concept split across two names, out-of-scope pages, and claims a newer

@@ -885,20 +885,67 @@ APPEND_LOG_SCHEMA = {
     },
 }
 
-# read_index is deliberately absent: an ingest's two uses for the index are
-# "what already exists" (list_wiki_pages, a tenth the size) and "which section"
-# (list_index_sections, a hundredth), and offering the 57 KB version invites the
-# model to spend a quarter of its context on it. It stays in the ingest dispatch
-# though — a vault's RULES.md is the system prompt and may well say "read
-# wiki/index.md" in prose, and a call that arrives anyway should work rather
-# than come back as an unknown-tool error.
-INGEST_TOOL_SCHEMAS = [
+SUBMIT_PLAN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "submit_plan",
+        "description": "Submit the list of wiki pages this source should touch. Call this ONCE, at the end, after you have read the source and listed the existing pages. Do not write any page content here — a later step writes each page. Include a page for every idea worth recording, and also include any existing page that needs a link added back to a page you are creating.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pages": {
+                    "type": "array",
+                    "description": "One entry per page to create or update.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Page name, e.g. 'ollama' (with or without .md). For an update, use the exact name from list_wiki_pages."},
+                            "action": {"type": "string", "enum": ["create", "update"], "description": "'update' if list_wiki_pages already shows this page, otherwise 'create'."},
+                            "intent": {"type": "string", "description": "One sentence: what this source adds to this page. For a link-back, say which page to link to, e.g. 'add a link to [[gemma-4]]'."},
+                            "section": {"type": "string", "description": "Index section heading this page belongs under. Use one from list_index_sections where it fits."},
+                        },
+                        "required": ["name", "action", "intent", "section"],
+                    },
+                },
+                "skipped": {"type": "string", "description": "Anything in the source deliberately left out as out of scope, or an empty string. This goes in the log entry."},
+            },
+            "required": ["pages"],
+        },
+    },
+}
+
+# read_index is deliberately absent from every ingest stage: the two uses for
+# the index are "what already exists" (list_wiki_pages, a tenth the size) and
+# "which section" (list_index_sections, a hundredth), and offering the 57 KB
+# version invites the model to spend a quarter of its context on it. It stays in
+# the stage dispatches though — a vault's RULES.md is part of the system prompt
+# and may well say "read wiki/index.md" in prose, and a call that arrives anyway
+# should work rather than come back as an unknown-tool error.
+
+# Stage 1. Deliberately has no read_wiki_page: deciding *which* pages to touch
+# needs their names, not their bodies, and reading them here would pull the
+# whole cost this split exists to remove back into the planning context.
+PLAN_TOOL_SCHEMAS = [
     READ_RAW_FILE_SCHEMA,
     LIST_WIKI_PAGES_SCHEMA,
+    LIST_INDEX_SECTIONS_SCHEMA,
+    SUBMIT_PLAN_SCHEMA,
+]
+
+# Stage 2, one conversation per planned page. No list_wiki_pages — the plan
+# already answered that, and re-listing 418 names per page would reintroduce the
+# largest single item in the old single-pass context, once per page instead of
+# once per source.
+EXECUTE_TOOL_SCHEMAS = [
+    READ_RAW_FILE_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     WRITE_WIKI_PAGE_SCHEMA,
-    LIST_INDEX_SECTIONS_SCHEMA,
     UPDATE_INDEX_SCHEMA,
+]
+
+# Stage 3. One tool, because the only thing left to do is record what the other
+# two stages did.
+LOG_TOOL_SCHEMAS = [
     APPEND_LOG_SCHEMA,
 ]
 

@@ -218,13 +218,37 @@ def test_list_index_sections_agrees_with_section_bounds(vault):
         assert wt._section_bounds(lines, name) is not None
 
 
-def test_ingest_schemas_offer_sections_not_the_whole_index():
+def test_no_ingest_stage_offers_the_whole_index():
     """The token saving only lands if read_index is un-advertised."""
-    names = [t["function"]["name"] for t in wt.INGEST_TOOL_SCHEMAS]
-    assert "list_index_sections" in names
-    assert "read_index" not in names
+    for schemas in (wt.PLAN_TOOL_SCHEMAS, wt.EXECUTE_TOOL_SCHEMAS, wt.LOG_TOOL_SCHEMAS):
+        assert "read_index" not in [t["function"]["name"] for t in schemas]
+    assert "list_index_sections" in [
+        t["function"]["name"] for t in wt.PLAN_TOOL_SCHEMAS
+    ]
     # The read side still gets the full table of contents.
     assert "read_index" in [t["function"]["name"] for t in wt.QUERY_TOOL_SCHEMAS]
+
+
+def test_planning_stage_cannot_read_or_write_pages():
+    """Stage 1 exists to decide *which* pages to touch. A page read here would
+    pull back the per-page bulk the split removes, and a write would make the
+    plan-only path write to the vault."""
+    names = [t["function"]["name"] for t in wt.PLAN_TOOL_SCHEMAS]
+    assert "read_wiki_page" not in names
+    assert "write_wiki_page" not in names
+    assert "update_index" not in names
+    assert "append_log" not in names
+
+
+def test_execute_stage_does_not_relist_every_page():
+    """418 page names is the largest item in the old context. Re-listing it once
+    per planned page would be worse than the problem being fixed."""
+    names = [t["function"]["name"] for t in wt.EXECUTE_TOOL_SCHEMAS]
+    assert "list_wiki_pages" not in names
+    assert "submit_plan" not in names
+    # append_log is stage 3's alone — it is the one non-idempotent tool, and a
+    # per-page stage would append once per page instead of once per source.
+    assert "append_log" not in names
 
 
 def test_query_dispatch_covers_exactly_the_query_schemas(vault):

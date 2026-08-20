@@ -1,15 +1,31 @@
 """Ingest new raw/ sources into a vault's wiki, unattended.
 
-Reads the vault's own RULES.md as the system prompt (folder structure, page
-format, citation rules — vault-specific, not hardcoded here) and processes
-one new raw source at a time via a tool-calling loop against the local
-Ollama model. Skips sources already recorded in wiki/.ingested.json.
+Each source goes through three stages, and each stage is its own conversation
+with the model:
+
+    1. plan     which pages this source should create or update, and nothing else
+    2. execute  one conversation per planned page, which writes that page
+    3. log      one wiki/log.md entry for the whole source
+
+They are separate because the model keeps nothing between calls, so a stage's
+whole transcript is re-sent every turn and every tool result stays in it until
+the stage ends. As one conversation, a source carried the full page list, every
+page it read and every page it wrote, all the way to the final log entry — 27,528
+tokens on 2026-08-20, 84% of the window, of which 74% was material already on
+disk. Split, planning costs ~15k and each page ~10k no matter how many pages the
+source touches.
+
+The vault's RULES.md supplies policy — scope, page format, citation rules, which
+pages should exist. The procedure is here, in the three stage wrappers below: it
+is a property of how this script drives the model, not of any vault, and when it
+lived in RULES.md every vault kept its own copy and they drifted apart.
 
 Vault-agnostic: this script has no idea what subject any given vault covers.
 Adding a new vault means a new folder with its own RULES.md, not new code.
 
 Usage:
     python wiki_ingest.py --vault ~/Vaults/llm-wiki-learnings
+    python wiki_ingest.py --vault ~/Vaults/llm-wiki-learnings --plan-only
 """
 
 import argparse
@@ -24,7 +40,10 @@ from agent.common import setup_logger, trim_launchd_log
 from agent.loop import complete_text, run_agent
 from agent.notify import notify_failure
 from agent.wiki_tools import (
-    INGEST_TOOL_SCHEMAS,
+    EXECUTE_TOOL_SCHEMAS,
+    LOG_TOOL_SCHEMAS,
+    PLAN_TOOL_SCHEMAS,
+    RESERVED,
     append_log,
     get_ingested_sources,
     list_binary_raw_files,
@@ -43,10 +62,26 @@ from agent.wiki_tools import (
     write_wiki_page,
 )
 
-# A single source can touch 10-15 pages per RULES.md's own note on that,
-# well beyond agent.loop's default cap (sized for the much shorter
-# LocalLLMAgent tasks this loop was copied from).
-MAX_INGEST_ITERATIONS = 30
+# Iteration caps, per stage. These are small now because each stage is a short
+# conversation with one job, where the old single-pass ingest needed 30 to carry
+# a whole source from read to log in one context.
+#
+# Stage 1 reads the source, lists the pages and the index sections, then submits
+# the plan: 4 calls, plus room to re-read or retry one.
+MAX_PLAN_ITERATIONS = 8
+# Stage 2 reads the source, optionally reads the page it is updating, writes it,
+# and files it in the index: 4 calls. The extra slack is for the cut-off nudge in
+# agent/loop.py, which costs an iteration each time it fires — one page in the
+# 2026-08-20 staged e2e run burned three that way before its write landed, and at
+# 8 a fourth would have exhausted the conversation with the page unwritten.
+MAX_EXECUTE_ITERATIONS = 12
+# Stage 3 appends one entry.
+MAX_LOG_ITERATIONS = 4
+
+# A plan is a list of page names and one-line intents, not page bodies. 15 pages
+# (RULES.md's own upper figure for one source) is roughly 450 tokens, so a plan
+# that runs far past this is a model looping rather than a big source.
+MAX_PLANNED_PAGES = 25
 
 # The local model intermittently reads a source and then returns a final
 # answer without ever calling a write tool — a transient no-op, not a
@@ -88,10 +123,89 @@ UNATTENDED_WRAPPER = """
 You are running unattended — there is no human available to discuss takeaways \
 with or ask clarifying questions. Wherever the rules above would have you ask \
 the user something, instead make your best judgment call, proceed, and note \
-what you decided and why in the log.md entry you append at the end. Never \
-leave a source partially processed and waiting for input.
+what you decided and why. Never leave a source partially processed and waiting \
+for input.
 
 Do not ask any questions. Do not wait for confirmation."""
+
+# The three stage prompts below are the ingest *procedure*. It used to live in
+# each vault's RULES.md as a numbered workflow, which broke once an ingest
+# stopped being one conversation: no single ordering is true for all three
+# stages, and a vault repeating the procedure per copy meant it drifted (the
+# aarp vault's copy still asked for hand-written index descriptions months after
+# update_index took that over). RULES.md now keeps policy — which pages should
+# exist, what goes on them — and this file keeps procedure.
+
+PLAN_WRAPPER = """
+
+## Your task right now
+
+You are step 1 of 3. Your only job is to decide WHICH pages this source should \
+touch. You are not writing any page content in this step — a later step writes \
+each page, one at a time.
+
+1. Read the source document in full.
+2. List the existing wiki pages. This is how you tell a new page from an \
+existing one: if a page already covers the entity or concept, the action is \
+'update', not 'create'. Never propose a second page for something the wiki \
+already covers under a different name.
+3. List the index sections, so you can name the section each page belongs under.
+4. Call submit_plan ONCE with the full list, then stop.
+
+Include in the plan:
+
+- every page that should be created or updated from this source's in-scope \
+material
+- for each page you are creating, at least one EXISTING page that should gain a \
+link back to it, as its own entry with action 'update' and an intent that says \
+which link to add. Links out of a new page are only half the connection.
+
+Do not call submit_plan more than once. Do not write page content in the \
+'intent' field — one sentence saying what changes is all that is needed."""
+
+EXECUTE_WRAPPER = """
+
+## Your task right now
+
+You are step 2 of 3. You are handling ONE page, named in the message below. \
+Every other page in the plan is handled by its own separate step — do not \
+write, read, or edit any page except the one you were given.
+
+1. Read the source document for the material this page needs.
+2. If the action is 'update', read the page first. write_wiki_page replaces the \
+whole file, so anything already on the page that is still true must be carried \
+forward into what you write. Everything you leave out is deleted.
+3. Call write_wiki_page once with the complete page, following the vault's page \
+format above.
+4. Call update_index once, naming this page and its section. Do not write a \
+description — it is taken from the page's own Summary line. Never send the whole \
+index; you are naming one page's home, not rewriting the file.
+
+Then stop. Do not append to the log — a later step does that for the whole \
+source at once.
+
+The source filename is NOT a wiki page name. Cite it as plain text in the \
+`**Sources**` line and in inline citations, exactly as given. Never write it as \
+a wiki-link. Wiki-links point only at page slugs from the list below — lowercase \
+with hyphens — so `[[ai-chat-learnings-2026-08-19]]`, never \
+`[[AI-Chat-Learnings-2026-08-19.md]]`.
+
+Keep the page focused. If it is getting long, the material probably belongs on \
+one of the other pages in the plan, and that page's own step will handle it."""
+
+LOG_WRAPPER = """
+
+## Your task right now
+
+You are step 3 of 3. Every page for this source has already been written. Your \
+only job is to record what happened.
+
+Call append_log ONCE with a single entry giving the date, the source filename, \
+which pages were created and which were updated, and anything that was skipped \
+as out of scope. The message below tells you exactly what happened — report \
+that, do not guess or add pages that are not listed.
+
+Then stop. Do not write or read any wiki page."""
 
 
 class _WriteCounter:
@@ -105,34 +219,126 @@ class _WriteCounter:
         return self.count > 0
 
 
-def _build_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
-    def _tracked_write_wiki_page(**kwargs):
-        result = write_wiki_page(vault_path, **kwargs)
-        # Only a write that landed counts. A refused reserved name comes back
-        # as an error result, and treating that as progress would mark a source
-        # ingested on the strength of a call that wrote nothing.
-        if "error" not in result:
-            writes.count += 1
-        return result
+class _Plan:
+    """What stage 1 decided this source should touch.
 
-    def _tracked_append_log(**kwargs):
-        writes.count += 1
-        return append_log(vault_path, **kwargs)
+    Holds validated entries only — see _clean_plan_pages for what is rejected.
+    Falsy when nothing survived, which the caller treats the same way it treats
+    a stage that wrote nothing: retry, then leave the source for tomorrow.
+    """
+
+    def __init__(self):
+        self.pages: list[dict] = []
+        self.skipped: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.pages)
+
+    def names(self) -> list[str]:
+        return [p["name"] for p in self.pages]
+
+
+def _clean_plan_pages(pages) -> list[dict]:
+    """Keep the entries that are safe to act on, drop the rest silently.
+
+    Stage 2 turns each entry straight into a write, so a malformed entry is not
+    a cosmetic problem — an entry naming 'index' would send a page body at the
+    file update_index owns. The tool layer refuses that too (write_wiki_page's
+    RESERVED check), but a plan that reaches stage 2 carrying it costs a whole
+    conversation to find out.
+
+    Duplicates are dropped rather than merged: two entries for one page mean two
+    stage-2 conversations racing to replace the same file, and the second would
+    overwrite the first with a version written without knowledge of it.
+    """
+    if not isinstance(pages, list):
+        return []
+
+    cleaned, seen = [], set()
+    for entry in pages:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        # Normalize the way the tools do, so 'ollama' and 'ollama.md' cannot
+        # both survive as separate entries.
+        stem = name[:-3] if name.endswith(".md") else name
+        if not stem or "/" in stem or "\\" in stem or stem.startswith("."):
+            continue
+        if f"{stem}.md".lower() in RESERVED:
+            continue
+        if stem.lower() in seen:
+            continue
+        seen.add(stem.lower())
+
+        action = str(entry.get("action") or "").strip().lower()
+        cleaned.append({
+            "name": stem,
+            # Anything that is not clearly 'create' is treated as an update.
+            # Guessing wrong toward 'update' is the safe direction: stage 2
+            # reads the page first, and read_wiki_page on a page that does not
+            # exist returns a plain not-found the model can act on. Guessing
+            # wrong toward 'create' skips the read and overwrites a real page.
+            "action": "create" if action == "create" else "update",
+            "intent": str(entry.get("intent") or "").strip(),
+            "section": str(entry.get("section") or "").strip(),
+        })
+    return cleaned[:MAX_PLANNED_PAGES]
+
+
+def _plan_dispatch(vault_path: str, plan: _Plan) -> dict:
+    """Stage 1's tools. submit_plan captures rather than writes — this stage
+    touches nothing, which is what makes --plan-only safe by construction."""
+    def _submit_plan(pages=None, skipped="", **_ignored):
+        cleaned = _clean_plan_pages(pages)
+        if not cleaned:
+            return {"error": "no usable pages in the plan — every entry needs a "
+                             "name, and index/log cannot be planned"}
+        plan.pages = cleaned
+        plan.skipped = str(skipped or "").strip()
+        return {"accepted": len(cleaned), "pages": [p["name"] for p in cleaned]}
 
     return {
         "read_raw_file": functools.partial(read_raw_file, vault_path),
         "list_wiki_pages": functools.partial(list_wiki_pages, vault_path),
+        "list_index_sections": functools.partial(list_index_sections, vault_path),
+        "submit_plan": _submit_plan,
+        # Unadvertised but dispatchable, in every stage — a vault's RULES.md is
+        # part of the system prompt and may name wiki/index.md in prose, and a
+        # call that arrives anyway should work rather than come back as an
+        # unknown-tool error.
+        "read_index": functools.partial(read_index, vault_path),
+    }
+
+
+def _execute_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
+    """Stage 2's tools, for one planned page."""
+    def _tracked_write_wiki_page(**kwargs):
+        result = write_wiki_page(vault_path, **kwargs)
+        # Only a write that landed counts. A refused reserved name comes back
+        # as an error result, and treating that as progress would mark a page
+        # done on the strength of a call that wrote nothing.
+        if "error" not in result:
+            writes.count += 1
+        return result
+
+    return {
+        "read_raw_file": functools.partial(read_raw_file, vault_path),
         "read_wiki_page": functools.partial(read_wiki_page, vault_path),
         "write_wiki_page": _tracked_write_wiki_page,
-        "list_index_sections": functools.partial(list_index_sections, vault_path),
-        # Not in INGEST_TOOL_SCHEMAS any more (list_index_sections replaced it),
-        # but still dispatchable: a vault's RULES.md is the system prompt and
-        # may say "read wiki/index.md" in prose, and that call should work
-        # rather than come back as an unknown tool.
-        "read_index": functools.partial(read_index, vault_path),
         "update_index": functools.partial(update_index, vault_path),
-        "append_log": _tracked_append_log,
+        "read_index": functools.partial(read_index, vault_path),
     }
+
+
+def _log_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
+    """Stage 3's one tool."""
+    def _tracked_append_log(**kwargs):
+        writes.count += 1
+        return append_log(vault_path, **kwargs)
+
+    return {"append_log": _tracked_append_log}
 
 
 def _load_rules(vault_path: str) -> str:
@@ -224,72 +430,197 @@ def sort_raw_files(vault_path: str, logger) -> None:
             logger.info(f"Sorted '{filename}' -> {result['moved']}")
 
 
-def _ingest_source(vault_path: str, filename: str, system_prompt: str, logger) -> bool:
-    """Run the ingest loop for one source, retrying the no-op failure below.
-    Returns whether any attempt actually wrote to the wiki."""
-    # One retry ceiling for the whole source, spanning every attempt.
-    budget.start_source(filename, MAX_RETRIES_PER_SOURCE)
+def _attempt(what: str, logger, run) -> bool:
+    """Run one stage up to MAX_INGEST_ATTEMPTS times, returning whether it
+    succeeded. `run` returns True when the stage did its job.
 
+    The local model intermittently reads its input and then answers without
+    calling a tool — a transient no-op rather than a capacity problem (observed
+    2026-05-11, which finally wrote its 14 pages on the 4th identical attempt).
+    That is what the retry is for, and it applies to all three stages.
+    """
     for attempt in range(1, MAX_INGEST_ATTEMPTS + 1):
-        # Fresh dispatch + write_counter per attempt — a retried source is
-        # re-processed from scratch. That is safe for the no-op failure
-        # this was written for (the model answers without calling a tool,
-        # so nothing was written), and for page writes generally, since
-        # write_wiki_page and update_index overwrite by name.
-        #
-        # It is NOT fully safe once the model call can fail *mid-loop*,
-        # which a remote provider makes possible (a Gemini 503 that
-        # outlasts the backoff in agent/loop.py). An attempt that wrote
-        # pages and appended to log.md before dying will, on retry,
-        # re-append: append_log is the one non-idempotent tool. The cost
-        # is a duplicate ledger entry, not lost or corrupted pages.
-        writes = _WriteCounter()
-        dispatch = _build_dispatch(vault_path, writes)
         try:
-            result = run_agent(
-                system_prompt=system_prompt,
-                user_prompt=(
-                    f"Ingest the source file '{filename}' from raw/ per the ingest "
-                    "workflow above: read it, create or update the relevant wiki "
-                    "pages with wiki-links between related concepts, call "
-                    "update_index once per page you wrote to file it under a "
-                    "section, and append a wiki/log.md entry describing what "
-                    "changed."
-                ),
-                tools=INGEST_TOOL_SCHEMAS,
-                dispatch=dispatch,
-                logger=logger,
-                max_iterations=MAX_INGEST_ITERATIONS,
-            )
-            logger.info(
-                f"Agent final response for '{filename}' "
-                f"(attempt {attempt}/{MAX_INGEST_ATTEMPTS}): {result}"
-            )
+            if run():
+                return True
         except budget.BudgetExceeded:
             # The whole point of the budget is that it outranks the retry
             # policy — another attempt is exactly what it exists to prevent.
             raise
         except Exception as e:
             logger.exception(
-                f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' "
-                f"raised: {e}"
+                f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} of {what} raised: {e}"
             )
             continue
-
-        if writes:
-            return True
         logger.warning(
-            f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} for '{filename}' produced "
-            "no wiki writes (model returned without calling write_wiki_page or "
-            "append_log)."
+            f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} of {what} did nothing "
+            "(model returned without calling the tool it was asked for)."
         )
-
     return False
 
 
-def ingest_vault(vault_path: str, logger) -> int:
+def _plan_source(vault_path: str, filename: str, rules: str, logger) -> _Plan:
+    """Stage 1: decide which pages this source should touch. Writes nothing."""
+    plan = _Plan()
+
+    def run() -> bool:
+        plan.pages = []
+        result = run_agent(
+            system_prompt=rules + UNATTENDED_WRAPPER + PLAN_WRAPPER,
+            user_prompt=(
+                f"Plan the ingest of the source file '{filename}' from raw/. "
+                "Read it, list the existing wiki pages and the index sections, "
+                "then call submit_plan once with every page this source should "
+                "create or update."
+            ),
+            tools=PLAN_TOOL_SCHEMAS,
+            dispatch=_plan_dispatch(vault_path, plan),
+            logger=logger,
+            max_iterations=MAX_PLAN_ITERATIONS,
+        )
+        logger.info(f"Plan response for '{filename}': {result}")
+        return bool(plan)
+
+    _attempt(f"planning '{filename}'", logger, run)
+    return plan
+
+
+def _execute_unit(
+    vault_path: str, filename: str, unit: dict, plan: _Plan, rules: str, logger
+) -> bool:
+    """Stage 2: write one planned page, in its own conversation.
+
+    The whole batch's page names go in the prompt. That is what keeps the two
+    RULES.md rules that need cross-page awareness working once the pages are no
+    longer written in one conversation — links must point at pages that will
+    exist, and the same idea must not be written twice under two names. It costs
+    about 150 tokens, against the ~7,500 that reading those pages cost when they
+    all shared one context.
+    """
+    writes = _WriteCounter()
+    siblings = [n for n in plan.names() if n != unit["name"]]
+
+    def run() -> bool:
+        writes.count = 0
+        result = run_agent(
+            system_prompt=rules + UNATTENDED_WRAPPER + EXECUTE_WRAPPER,
+            user_prompt=(
+                f"Source file to cite (plain text, never a wiki-link): "
+                f"'{filename}'\n"
+                f"Page to write: '{unit['name']}'\n"
+                f"Action: {unit['action']}\n"
+                f"What this page needs from the source: {unit['intent']}\n"
+                f"Index section: {unit['section']}\n\n"
+                "Other pages being written from this same source, by their own "
+                "separate steps. These are the only wiki-links you may add for "
+                "this source — link to them where the text calls for it, and do "
+                "not duplicate what they cover: "
+                + (", ".join(f"[[{n}]]" for n in siblings) if siblings else "none")
+            ),
+            tools=EXECUTE_TOOL_SCHEMAS,
+            dispatch=_execute_dispatch(vault_path, writes),
+            logger=logger,
+            max_iterations=MAX_EXECUTE_ITERATIONS,
+        )
+        # Say which of the two happened. This used to read "Wrote 'x'"
+        # unconditionally, so a no-op attempt logged a write that never landed —
+        # and the log is the record outside the model's reach.
+        verb = "Wrote" if writes else "No write from"
+        logger.info(f"{verb} '{unit['name']}' for '{filename}': {result}")
+        return bool(writes)
+
+    return _attempt(f"writing '{unit['name']}' for '{filename}'", logger, run)
+
+
+def _write_log_entry(
+    vault_path: str, filename: str, plan: _Plan, done: list[dict], rules: str, logger
+) -> bool:
+    """Stage 3: one log.md entry for the whole source.
+
+    Kept apart from the page writes for two reasons. append_log is the one
+    non-idempotent tool in the set, so it belongs where it runs exactly once;
+    and this way the entry is written from a record of what actually landed
+    rather than from the model's recollection of a long conversation.
+    """
+    writes = _WriteCounter()
+    created = [u["name"] for u in done if u["action"] == "create"]
+    updated = [u["name"] for u in done if u["action"] != "create"]
+
+    def run() -> bool:
+        writes.count = 0
+        result = run_agent(
+            system_prompt=rules + UNATTENDED_WRAPPER + LOG_WRAPPER,
+            user_prompt=(
+                f"Source file ingested: '{filename}'\n"
+                f"Pages created: {', '.join(created) if created else 'none'}\n"
+                f"Pages updated: {', '.join(updated) if updated else 'none'}\n"
+                f"Skipped as out of scope: {plan.skipped or 'nothing'}\n\n"
+                "Append one log.md entry recording this."
+            ),
+            tools=LOG_TOOL_SCHEMAS,
+            dispatch=_log_dispatch(vault_path, writes),
+            logger=logger,
+            max_iterations=MAX_LOG_ITERATIONS,
+        )
+        logger.info(f"Log entry for '{filename}': {result}")
+        return bool(writes)
+
+    return _attempt(f"logging '{filename}'", logger, run)
+
+
+def _ingest_source(vault_path: str, filename: str, rules: str, logger) -> bool:
+    """Plan the source, write each planned page in its own conversation, then
+    record what happened. Returns whether the source is fully ingested.
+
+    Fully: every planned page landed. A partial result deliberately returns
+    False and leaves the source unmarked, so tomorrow's run redoes it. That is
+    safe because write_wiki_page and update_index overwrite by name, and because
+    stage 3 — the one non-idempotent step — only runs on a complete pass.
+
+    This is stricter than the old single-pass ingest, which marked a source done
+    as soon as *any* write landed. wiki_lint.check_source_coverage exists partly
+    to find the half-ingested sources that produced.
+    """
+    # One retry ceiling for the whole source, spanning all three stages. A spent
+    # ceiling means the server is unwell, which is a property of the box and not
+    # of any one page.
+    budget.start_source(filename, MAX_RETRIES_PER_SOURCE)
+
+    plan = _plan_source(vault_path, filename, rules, logger)
+    if not plan:
+        logger.warning(
+            f"No usable plan for '{filename}' after {MAX_INGEST_ATTEMPTS} "
+            "attempts — nothing was written."
+        )
+        return False
+
+    logger.info(
+        f"Plan for '{filename}': {len(plan.pages)} page(s) — "
+        + ", ".join(f"{p['name']} ({p['action']})" for p in plan.pages)
+    )
+
+    done, failed = [], []
+    for unit in plan.pages:
+        budget.check(f"page '{unit['name']}' of '{filename}'")
+        if _execute_unit(vault_path, filename, unit, plan, rules, logger):
+            done.append(unit)
+        else:
+            failed.append(unit["name"])
+
+    if failed:
+        logger.warning(
+            f"'{filename}': {len(done)}/{len(plan.pages)} planned page(s) "
+            f"written; failed on {', '.join(failed)}. Leaving the source "
+            "unmarked so the next run redoes it."
+        )
+        return False
+
+    # Only now, with every page on disk, is there something true to record.
+    return _write_log_entry(vault_path, filename, plan, done, rules, logger)
+
+
+def ingest_vault(vault_path: str, logger, plan_only: bool = False) -> int:
     rules = _load_rules(vault_path)
-    system_prompt = rules + UNATTENDED_WRAPPER
 
     # Organize freshly dropped files into their subdirectories first, so the
     # ingest loop below only ever encounters sorted sources.
@@ -323,6 +654,9 @@ def ingest_vault(vault_path: str, logger) -> int:
         logger.info("Nothing to ingest — all raw sources already processed.")
         return 0
 
+    if plan_only:
+        return _plan_only(vault_path, pending, rules, logger)
+
     failures = 0
     processed = 0
 
@@ -330,7 +664,7 @@ def ingest_vault(vault_path: str, logger) -> int:
         logger.info(f"Ingesting '{filename}'")
         try:
             budget.check(f"'{filename}'")
-            wrote = _ingest_source(vault_path, filename, system_prompt, logger)
+            wrote = _ingest_source(vault_path, filename, rules, logger)
         except budget.BudgetExceeded as e:
             # Either limit abandons the whole run, not just this source. A
             # spent retry ceiling means the *server* is unwell — transport
@@ -349,11 +683,35 @@ def ingest_vault(vault_path: str, logger) -> int:
         else:
             failures += 1
             logger.warning(
-                f"'{filename}' produced no wiki writes after {MAX_INGEST_ATTEMPTS} "
-                "attempts — leaving it unmarked so the next run retries it."
+                f"'{filename}' was not fully ingested — leaving it unmarked so "
+                "the next run retries it."
             )
 
     return 1 if failures else 0
+
+
+def _plan_only(vault_path: str, pending: list[str], rules: str, logger) -> int:
+    """Show what each pending source would do, and change nothing.
+
+    Stage 1 has no tool that writes (see PLAN_TOOL_SCHEMAS), so this cannot
+    touch the vault even if the model tries — the point is to be able to read
+    real plans before trusting the stage that acts on them.
+    """
+    for filename in pending:
+        budget.check(f"planning '{filename}'")
+        plan = _plan_source(vault_path, filename, rules, logger)
+        print(f"\n=== {filename} ===")
+        if not plan:
+            print("  (no usable plan)")
+            continue
+        for unit in plan.pages:
+            print(f"  [{unit['action']:6}] {unit['name']}")
+            print(f"           {unit['intent']}")
+            print(f"           index section: {unit['section']}")
+        if plan.skipped:
+            print(f"  skipped: {plan.skipped}")
+    print(f"\n{len(pending)} source(s) planned. Nothing was written.")
+    return 0
 
 
 def _budget_minutes() -> float:
@@ -376,6 +734,12 @@ def main() -> int:
         help="Wall-clock budget for the whole run (default: "
              f"$WIKI_RUN_BUDGET_MINUTES or {DEFAULT_RUN_BUDGET_MINUTES}).",
     )
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Print what each pending source would create or update, then stop. "
+             "Writes nothing and marks nothing.",
+    )
     args = parser.parse_args()
 
     vault_name = Path(args.vault).name
@@ -392,7 +756,7 @@ def main() -> int:
     job = f"wiki_ingest[{vault_name}]"
     started = time.monotonic()
     try:
-        rc = ingest_vault(args.vault, logger)
+        rc = ingest_vault(args.vault, logger, plan_only=args.plan_only)
         logger.info("Wiki ingest run complete")
     except budget.BudgetExceeded as e:
         mins = (time.monotonic() - started) / 60
