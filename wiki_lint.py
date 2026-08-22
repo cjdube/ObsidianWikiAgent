@@ -585,24 +585,54 @@ def apply_safe_fixes(vault_path: str, pages: dict[str, str]) -> list[str]:
     (create-vs-delink), bad dates, invented citations — is deliberately left
     for a human. `pages` is updated in place to reflect the writes.
 
-    Two fixes qualify as safe:
+    Three fixes qualify as safe:
       1. Self-links — a page linking to itself is never meaningful.
       2. Dead index links — a table-of-contents entry pointing at no real page
          (reusing the same de-linking the ingest guard applies).
+      3. Escaped text — `\\"` where a quote belongs, `\\u2019` where an
+         apostrophe does (reusing the ingest's own decode).
 
-    Both go through agent/wikilinks.py, which is also what check_links reads
-    links with. That shared pattern is the point: this function writes to the
-    vault on the strength of what a check reported, so a fix that recognised
-    links the check did not could edit a page nobody was told about."""
+    Each goes through the module the matching check reads with — agent/
+    wikilinks.py for the two link fixes, _quotes_outside_json for the third.
+    That shared code is the point: this function writes to the vault on the
+    strength of what a check reported, so a fix that recognised damage the check
+    did not could edit a page nobody was told about.
+
+    Fix 3 earns its place here on evidence rather than on argument. Run against
+    the 23 pages that held this damage on 2026-08-21 it reproduces, byte for
+    byte, a sweep that was done by hand and inspected line by line; run against
+    the vault as it now stands it changes nothing. Its two exemptions — a
+    ```json fence, where the backslash is real syntax, and a line about escaping,
+    which is showing one on purpose — come from the shared function, so the check
+    and the fix cannot disagree about them either."""
     wiki_dir = Path(vault_path) / "wiki"
     changes: list[str] = []
 
     for slug in sorted(pages):
-        cleaned, n = strip_links_to(pages[slug], slug)
+        original = pages[slug]
+        content = original
+        notes: list[str] = []
+
+        # Before the link pass, so anything the decode reveals is a real link by
+        # the time strip_links_to reads it.
+        decoded = _quotes_outside_json(content)
+        if decoded != content:
+            n = sum(
+                1 for before, after in zip(content.split("\n"), decoded.split("\n"))
+                if before != after
+            )
+            content = decoded
+            notes.append(f"decoded escaped text on {n} line{'s' if n > 1 else ''}")
+
+        content, n = strip_links_to(content, slug)
         if n:
-            (wiki_dir / f"{slug}.md").write_text(cleaned, encoding="utf-8")
-            pages[slug] = cleaned
-            changes.append(f"{slug}.md: removed {n} self-link{'s' if n > 1 else ''}")
+            notes.append(f"removed {n} self-link{'s' if n > 1 else ''}")
+
+        # One write per page however many fixes applied, reported separately.
+        if content != original:
+            (wiki_dir / f"{slug}.md").write_text(content, encoding="utf-8")
+            pages[slug] = content
+            changes.extend(f"{slug}.md: {note}" for note in notes)
 
     index_path = wiki_dir / "index.md"
     if index_path.is_file():

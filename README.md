@@ -259,10 +259,13 @@ Once a vault is set up and scheduled, this is the actual workflow:
    source has overtaken. That pass calls the model, so it costs a couple of
    minutes.
 
-   Add `--fix` to apply the two mechanical fixes that need no judgment:
-   stripping self-links, and de-linking index entries pointing at pages that
-   no longer exist. This is the only way `wiki_lint.py` writes to the vault,
-   and it is deliberately narrow — every judgment call (which of two
+   Add `--fix` to apply the three mechanical fixes that need no judgment:
+   stripping self-links, de-linking index entries pointing at pages that
+   no longer exist, and decoding escaped text (`\"` where a quote belongs).
+   Each reuses the code the matching check reads with, so a fix can never
+   recognise damage its check did not report. This is the only way
+   `wiki_lint.py` writes to the vault — the scheduled job does not pass it —
+   and it is deliberately narrow: every judgment call (which of two
    overlapping pages survives, whether an orphan earns its page, a bad date, an
    invented citation) is left for you.
 

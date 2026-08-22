@@ -491,6 +491,71 @@ def test_apply_safe_fixes_leaves_judgment_items_alone(vault):
     assert changes == []                     # nothing mechanical to fix
 
 
+def test_apply_safe_fixes_decodes_escaped_text(vault):
+    vault.page("vibe", '# Vibe\n\n**Summary**: A \\"vibe\\" shift.\n')
+    pages = wl._pages(vault.path)
+
+    changes = wl.apply_safe_fixes(vault.path, pages)
+
+    assert (vault.root / "wiki" / "vibe.md").read_text() == (
+        '# Vibe\n\n**Summary**: A "vibe" shift.\n'
+    )
+    assert changes == ["vibe.md: decoded escaped text on 1 line"]
+
+
+def test_apply_safe_fixes_reports_the_line_count(vault):
+    vault.page("x", '# X\n\nA \\"one\\".\n\nB \\"two\\".\n')
+    changes = wl.apply_safe_fixes(vault.path, wl._pages(vault.path))
+    assert changes == ["x.md: decoded escaped text on 2 lines"]
+
+
+def test_apply_safe_fixes_honours_the_decode_exemptions(vault):
+    """The exemptions come from the shared function, so --fix inherits them and
+    cannot corrupt what the check deliberately stays quiet about."""
+    fence = '# Hooks\n\n```json\n{"c": "prettier \\"$FILE\\""}\n```\n'
+    prose = "# OWA\n\nFixed JSON escape sequences (`\\u2019`) in the vault.\n"
+    vault.page("hooks", fence)
+    vault.page("owa", prose)
+
+    changes = wl.apply_safe_fixes(vault.path, wl._pages(vault.path))
+
+    assert changes == []
+    assert (vault.root / "wiki" / "hooks.md").read_text() == fence
+    assert (vault.root / "wiki" / "owa.md").read_text() == prose
+
+
+def test_apply_safe_fixes_writes_a_page_once_for_both_fixes(vault):
+    """A page needing the decode and a self-link strip gets one write and two
+    lines in the log, not two writes."""
+    vault.page("a", '# A\n\nSee [[a]] about \\"scope\\".\n')
+    pages = wl._pages(vault.path)
+
+    changes = wl.apply_safe_fixes(vault.path, pages)
+    content = (vault.root / "wiki" / "a.md").read_text()
+
+    assert '"scope"' in content and "[[a]]" not in content
+    assert changes == [
+        "a.md: decoded escaped text on 1 line",
+        "a.md: removed 1 self-link",
+    ]
+    # pages is updated in place so the checks that run next see the fixed text.
+    assert pages["a"] == content
+
+
+def test_check_and_fix_agree_on_escaped_text(vault):
+    """What check_escaped_text reports is exactly what --fix repairs — the two
+    read the same function, so neither can name a page the other ignores."""
+    vault.page("damaged", '# D\n\nA \\"quote\\".\n')
+    vault.page("fenced", '# F\n\n```json\n{"a": "\\"b\\""}\n```\n')
+    pages = wl._pages(vault.path)
+
+    flagged = {f.split(".md")[0] for f in wl.check_escaped_text(pages)}
+    fixed = {c.split(".md")[0] for c in wl.apply_safe_fixes(vault.path, pages)}
+
+    assert flagged == fixed == {"damaged"}
+    assert wl.check_escaped_text(pages) == []   # nothing left to report
+
+
 def test_apply_safe_fixes_clean_vault_no_changes(vault):
     vault.page("a", "# A\n\n[[b]]\n")
     vault.page("b", "# B\n\n[[a]]\n")
