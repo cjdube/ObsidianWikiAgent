@@ -1020,6 +1020,72 @@ def test_write_wiki_page_leaves_a_code_block_backslash_n_alone(vault):
     assert (vault.root / "wiki" / "regex.md").read_text() == body
 
 
+def test_write_wiki_page_decodes_quotes_when_the_newlines_are_fine(vault):
+    """The gap the ratio test never covered. A body whose newlines survived
+    still carries \\" through every quotation, passes the ratio check untouched,
+    and lands on disk looking almost right — which is how 41 lines across 23
+    pages went unnoticed until they were swept by hand on 2026-08-21."""
+    wt.write_wiki_page(
+        vault.path,
+        "vibe-coding",
+        '# Vibe Coding\n\n**Summary**: A \\"vibe\\" shift.\n\nSee the \\"end\\" of it.\n',
+    )
+    written = (vault.root / "wiki" / "vibe-coding.md").read_text()
+    assert written == (
+        '# Vibe Coding\n\n**Summary**: A "vibe" shift.\n\nSee the "end" of it.\n'
+    )
+
+
+def test_write_wiki_page_decodes_unicode_escapes(vault):
+    wt.write_wiki_page(
+        vault.path, "fpl", "# FPL\n\nTypically 5\\u201310 hours\\u2014weekly.\n"
+    )
+    assert (vault.root / "wiki" / "fpl.md").read_text() == (
+        "# FPL\n\nTypically 5–10 hours—weekly.\n"
+    )
+
+
+def test_write_wiki_page_keeps_escaped_quotes_inside_a_json_fence(vault):
+    """Inside a JSON string, \\" is how a quote is spelled. Decoding it breaks
+    the example — claude-code-hooks.md has two such lines."""
+    body = (
+        '# Hooks\n\n**Summary**: s\n\n```json\n'
+        '{"command": "npx prettier --write \\"$CLAUDE_FILE_PATH\\""}\n'
+        '```\n'
+    )
+    wt.write_wiki_page(vault.path, "hooks", body)
+    assert (vault.root / "wiki" / "hooks.md").read_text() == body
+
+
+def test_write_wiki_page_decodes_escaped_quotes_inside_a_bash_fence(vault):
+    """Only json is exempt. The shell needs no backslash before a quote, so one
+    there is the same damage as anywhere else."""
+    wt.write_wiki_page(
+        vault.path,
+        "tools",
+        '# Tools\n\n```bash\npython -m weather --location \\"Boston,MA,US\\"\n```\n',
+    )
+    assert 'python -m weather --location "Boston,MA,US"' in (
+        vault.root / "wiki" / "tools.md").read_text()
+
+
+def test_write_wiki_page_leaves_a_line_about_escaping_alone(vault):
+    """A sentence about escape sequences is showing one on purpose. Two pages
+    in this vault narrate an earlier repair of exactly this damage."""
+    body = '# OWA\n\nFixed JSON escape sequences (`\\u2019`) across the vault.\n'
+    wt.write_wiki_page(vault.path, "owa", body)
+    assert (vault.root / "wiki" / "owa.md").read_text() == body
+
+
+def test_edit_wiki_page_gets_the_same_guard(vault):
+    """Both write paths enter the vault through _decode_if_escaped, so neither
+    can be the one that lets escaping back in."""
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Context Management", content='- A \\"quoted\\" fact.')
+
+    assert '- A "quoted" fact.' in (vault.root / "wiki" / "ollama.md").read_text()
+
+
 def test_write_wiki_page_rejects_traversal(vault):
     result = wt.write_wiki_page(vault.path, "../../escape", "x")
     assert "error" in result

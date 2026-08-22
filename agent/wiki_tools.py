@@ -376,6 +376,47 @@ def _unescape_once(content: str) -> str:
     return _ESCAPE_RE.sub(repl, content)
 
 
+_ESCAPED_QUOTE_RE = re.compile(r'\\+"')
+_ESCAPED_UNICODE_RE = re.compile(r"\\+u([0-9a-fA-F]{4})")
+
+
+def _quotes_outside_json(content: str) -> str:
+    """Undo \\" and \\uXXXX everywhere they are damage rather than syntax.
+
+    Two exemptions, and both are load-bearing — the 2026-08-21 sweep hit both
+    and would have corrupted four places without them.
+
+    A ```json fence is the one context where \\" is required rather than
+    wrong: inside a JSON string it *is* how a quote is spelled, and decoding it
+    breaks the example. Only json — a ```bash fence showing
+    `--location \\"Boston,MA,US\\"` is damage like any other, since the shell
+    needs no backslash there.
+
+    A line that talks about escaping is showing an escape on purpose. This
+    vault has two pages narrating an earlier repair of this very damage
+    ("Fixed JSON escape sequences (`\\u2019`)…"), and decoding those deletes
+    the subject of the sentence.
+
+    Deliberately narrower than _unescape_once: only quotes and unicode escapes.
+    Extending it to \\n or \\t would mangle every code block that legitimately
+    shows one, which is the case the ratio test in _decode_if_escaped exists to
+    protect.
+    """
+    out, lang = [], None
+    for line in content.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            lang = None if lang is not None else (stripped[3:].strip().lower() or "plain")
+            out.append(line)
+            continue
+        if lang == "json" or "escape" in line.lower():
+            out.append(line)
+            continue
+        line = _ESCAPED_QUOTE_RE.sub('"', line)
+        out.append(_ESCAPED_UNICODE_RE.sub(lambda m: chr(int(m.group(1), 16)), line))
+    return "\n".join(out)
+
+
 def _decode_if_escaped(content: str) -> str:
     """Undo JSON escaping the model applied to a page body one time too many.
 
@@ -393,14 +434,27 @@ def _decode_if_escaped(content: str) -> str:
     and a later ingest re-reads the damage as the page's true content — so it is
     caught at the boundary where the page enters the vault.
 
-    The test is the ratio, not the presence: a page may legitimately show \\n
-    inside a fenced code block, but never more often than it starts a new line.
-    Decoding repeats because bodies arrive doubly and triply encoded.
+    Two passes, because the damage arrives in two severities.
+
+    The first is the collapse. The test there is the ratio, not the presence: a
+    page may legitimately show \\n inside a fenced code block, but never more
+    often than it starts a new line. Decoding repeats because bodies arrive
+    doubly and triply encoded.
+
+    The second is _quotes_outside_json, and it exists because the ratio test
+    only ever caught the loud half. A body whose newlines survived intact can
+    still carry \\" through every quotation on the page, and that passes the
+    ratio check untouched — which is how 41 lines across 23 pages came to hold
+    escaped quotes that nothing reported and nothing repaired, until they were
+    swept by hand on 2026-08-21.
     """
     for _ in range(5):
         if content.count("\\n") <= content.count("\n"):
             break
         content = _unescape_once(content)
+    # After the collapse is undone, not before: the line-by-line pass below
+    # needs real lines to find the fences it must leave alone.
+    content = _quotes_outside_json(content)
     return content
 
 
