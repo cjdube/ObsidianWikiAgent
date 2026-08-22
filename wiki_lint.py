@@ -59,6 +59,9 @@ from agent.wiki_tools import (
     read_index,
     scan_raw,
 )
+# The ingest's own escaping guard, borrowed rather than re-implemented — see
+# check_escaped_text.
+from agent.wiki_tools import _quotes_outside_json
 from agent.wikilinks import (
     LINK_RE,
     delink_broken,
@@ -385,6 +388,51 @@ def check_lens_frontmatter(pages: dict[str, str]) -> list[str]:
     return findings
 
 
+def check_escaped_text(pages: dict[str, str]) -> list[str]:
+    """Pages holding JSON escaping as literal text — `\\"` where a quote
+    belongs, `\\u2019` where a curly apostrophe does.
+
+    The damage this looks for is the quiet kind. A body that arrives collapsed
+    into one line is caught at the boundary and is obvious besides; a body whose
+    newlines are fine but whose every quotation carries a backslash lands
+    looking almost right, renders as backslashes in Obsidian, and was invisible
+    to every check here. 41 lines across 23 pages accumulated that way and were
+    found only by reading the vault, on 2026-08-21.
+
+    write_wiki_page and edit_wiki_page both decode this now, so the ingest
+    cannot be the source any more. What this catches is the other routes — a
+    hand edit, a page restored from an older snapshot, a vault touched by
+    something that never went through the tools.
+
+    The test *is* the guard: a page is damaged exactly when running it through
+    _quotes_outside_json would change it. Sharing the rule rather than restating
+    it is deliberate, and the same reasoning that gave [[wiki-link]] syntax one
+    owner — a check and the code that repairs it must not be able to disagree
+    about what counts, or the report names pages that the fix then leaves alone.
+    That also means the two exemptions come along for free: a ```json fence,
+    where the backslash is real syntax, and a line about escaping, which is
+    showing one on purpose.
+    """
+    findings = []
+    for slug, content in sorted(pages.items()):
+        decoded = _quotes_outside_json(content)
+        if decoded == content:
+            continue
+        bad = [
+            i for i, (before, after)
+            in enumerate(zip(content.split("\n"), decoded.split("\n")), 1)
+            if before != after
+        ]
+        where = f"line {bad[0]}" if len(bad) == 1 else f"{len(bad)} lines, first at {bad[0]}"
+        findings.append(
+            f"{slug}.md holds JSON escaping as literal text ({where}) — a "
+            f"quote or apostrophe written as `\\\"` or `\\u2019`. It renders "
+            f"with the backslashes in Obsidian. The ingest decodes this now, so "
+            f"a page still carrying it was edited outside the tools."
+        )
+    return findings
+
+
 def check_duplicate_titles(pages: dict[str, str]) -> list[str]:
     """Two pages with the same title are the same page. Concepts duplicated
     under *different* titles need judgment and are left to the --deep pass."""
@@ -526,6 +574,7 @@ def structural_findings(
         "Duplicate titles": check_duplicate_titles(pages),
         "Template twins": check_template_twins(pages),
         "Lens integrity": check_lens_frontmatter(pages),
+        "Escaped text": check_escaped_text(pages),
     }
 
 

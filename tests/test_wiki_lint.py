@@ -553,6 +553,64 @@ def test_check_lens_frontmatter_ignores_a_dated_log_that_mentions_the_tool():
     assert wl.check_lens_frontmatter({"ai-chat-learnings-2026-08-03": page}) == []
 
 
+# --- check_escaped_text -----------------------------------------------------
+
+
+def test_check_escaped_text_flags_an_escaped_quote():
+    page = '# Vibe Coding\n\n**Summary**: A \\"vibe\\" shift.\n'
+    findings = wl.check_escaped_text({"vibe-coding": page})
+    assert len(findings) == 1
+    assert "JSON escaping as literal text" in findings[0]
+    assert "line 3" in findings[0]
+
+
+def test_check_escaped_text_counts_the_lines_it_found():
+    page = '# X\n\nA \\"one\\".\n\nB \\"two\\".\n'
+    assert "2 lines, first at 3" in wl.check_escaped_text({"x": page})[0]
+
+
+def test_check_escaped_text_flags_a_unicode_escape():
+    page = "# FPL\n\nTypically 5\\u201310 hours a week.\n"
+    assert len(wl.check_escaped_text({"fpl": page})) == 1
+
+
+def test_check_escaped_text_passes_a_clean_page():
+    page = '# Colima\n\n**Summary**: A "container" runtime.\n'
+    assert wl.check_escaped_text({"colima": page}) == []
+
+
+def test_check_escaped_text_exempts_a_json_fence():
+    """Inside a JSON string the backslash is syntax, not damage. The check gets
+    this from the guard it shares rather than restating the rule."""
+    page = (
+        '# Hooks\n\n```json\n'
+        '{"command": "prettier --write \\"$FILE\\""}\n'
+        '```\n'
+    )
+    assert wl.check_escaped_text({"claude-code-hooks": page}) == []
+
+
+def test_check_escaped_text_exempts_a_line_about_escaping():
+    page = "# OWA\n\nFixed JSON escape sequences (`\\u2019`) across the vault.\n"
+    assert wl.check_escaped_text({"obsidian-wiki-agent": page}) == []
+
+
+def test_check_escaped_text_agrees_with_the_ingest_guard():
+    """The check and the code that repairs it must not be able to disagree
+    about what counts — a report naming pages the fix then leaves alone is
+    worse than no report."""
+    from agent.wiki_tools import _quotes_outside_json
+
+    pages = {
+        "damaged": '# X\n\nA \\"quote\\".\n',
+        "clean": '# Y\n\nA "quote".\n',
+        "json-fence": '# Z\n\n```json\n{"a": "\\"b\\""}\n```\n',
+    }
+    flagged = {f.split(".md")[0] for f in wl.check_escaped_text(pages)}
+    would_change = {s for s, c in pages.items() if _quotes_outside_json(c) != c}
+    assert flagged == would_change == {"damaged"}
+
+
 # --- main(): run boundaries, alerting, and the --deep budget ----------------
 
 

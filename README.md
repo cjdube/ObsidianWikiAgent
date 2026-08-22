@@ -244,8 +244,8 @@ Once a vault is set up and scheduled, this is the actual workflow:
    Report-only by default — without `--fix` it never writes to the vault.
    Structural checks (broken and self links, orphan pages, index gaps, source
    coverage, page format, misspelled slugs, duplicate titles, template twins,
-   lens integrity) run in Python, so they are instant, free, and cannot miss a
-   page. Exits non-zero when it finds something.
+   lens integrity, escaped text) run in Python, so they are instant, free, and
+   cannot miss a page. Exits non-zero when it finds something.
 
    Source coverage catches an ingest that stopped early. The staged ingest
    already marks a source done only when every page it planned actually landed,
