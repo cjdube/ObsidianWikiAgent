@@ -135,6 +135,20 @@ Do not ask any questions. Do not wait for confirmation."""
 # aarp vault's copy still asked for hand-written index descriptions months after
 # update_index took that over). RULES.md now keeps policy — which pages should
 # exist, what goes on them — and this file keeps procedure.
+#
+# Splitting the stages also split the question of whether the model should reason
+# before answering, and the three stages want different answers. Stage 1 judges:
+# it decides which pages a source touches, and whether a thing the wiki already
+# covers is the same thing under another name. Stages 2 and 3 transcribe — the
+# page to write and what happened are both settled by the time they start, and
+# handed to them in the prompt.
+#
+# Measured, and the two kinds part company sharply. Stage 2 with reasoning off
+# ran 3.4x faster and *kept more of the page* (94/95 lines against 23/95), so
+# stages 2 and 3 pass think=False; agent/loop.py's _run_ollama carries the
+# numbers and why the accuracy moves with the speed rather than against it.
+# Stage 1 with reasoning off failed to call submit_plan in 3 of 6 trials, so it
+# is left alone — a stage that decides nothing is a source not ingested.
 
 PLAN_WRAPPER = """
 
@@ -521,6 +535,7 @@ def _execute_unit(
             dispatch=_execute_dispatch(vault_path, writes),
             logger=logger,
             max_iterations=MAX_EXECUTE_ITERATIONS,
+            think=False,
         )
         # Say which of the two happened. This used to read "Wrote 'x'"
         # unconditionally, so a no-op attempt logged a write that never landed —
@@ -561,6 +576,7 @@ def _write_log_entry(
             dispatch=_log_dispatch(vault_path, writes),
             logger=logger,
             max_iterations=MAX_LOG_ITERATIONS,
+            think=False,
         )
         logger.info(f"Log entry for '{filename}': {result}")
         return bool(writes)

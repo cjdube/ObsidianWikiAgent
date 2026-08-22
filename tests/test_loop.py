@@ -308,6 +308,70 @@ def test_ollama_calls_send_num_ctx(monkeypatch):
         assert payload["options"]["num_ctx"] == 12345
 
 
+def test_think_false_reaches_ollama(monkeypatch):
+    """A stage that transcribes rather than judges turns reasoning off, and the
+    field has to actually land on the request for that to mean anything — the
+    reasoning block shares num_predict with the reply, so leaving it on is what
+    cuts a page write short (see _run_ollama)."""
+    seen = []
+
+    def fake_post(url, payload, **kwargs):
+        seen.append(payload)
+        return FakeResp(200, json_data={"message": {"content": "done"}})
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama", think=False)
+
+    assert seen[0]["think"] is False
+
+
+def test_think_is_omitted_by_default(monkeypatch):
+    """Saying nothing must send nothing. A model with no notion of thinking
+    should see exactly the request it saw before the parameter existed, rather
+    than a field it has to ignore."""
+    seen = []
+
+    def fake_post(url, payload, **kwargs):
+        seen.append(payload)
+        return FakeResp(200, json_data={"message": {"content": "done"}})
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama")
+    loop.complete_text("sys", "user", provider="ollama")
+
+    assert len(seen) == 2
+    for payload in seen:
+        assert "think" not in payload
+
+
+def test_think_is_ignored_on_the_gemini_path(monkeypatch):
+    """Gemini has no such field, and the caller setting it is describing the
+    local model rather than stating a requirement. So the run proceeds without
+    it — the weekly `wiki_lint --deep` pass shares run_agent and sets
+    LLM_PROVIDER=gemini."""
+    seen = []
+
+    def fake_post(url, payload, **kwargs):
+        seen.append(payload)
+        return FakeResp(
+            200,
+            json_data={"candidates": [{"content": {"parts": [{"text": "done"}]}}]},
+        )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    result = loop.run_agent(
+        "sys", "user", tools=[], dispatch={}, provider="gemini", think=False
+    )
+
+    assert result == "done"
+    assert "think" not in seen[0]
+
+
 def test_ollama_calls_send_num_predict(monkeypatch):
     """Ollama's default output length is unlimited, so an uncapped call can
     generate until the client times out — which cost a whole ingest run."""

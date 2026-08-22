@@ -309,6 +309,7 @@ def run_agent(
     logger: Optional[logging.Logger] = None,
     max_iterations: int = MAX_TOOL_ITERATIONS,
     provider: str = None,
+    think: Optional[bool] = None,
 ) -> str:
     """Run the tool-calling loop and return the model's final text response.
 
@@ -319,6 +320,11 @@ def run_agent(
     max_iterations: raise for workflows that legitimately need many tool
               calls (e.g. wiki ingest, which can touch 10-15 pages per source).
     provider: 'ollama' (default) or 'gemini'; falls back to $LLM_PROVIDER.
+    think: see _run_ollama. Ollama only — Gemini has no equivalent field, and a
+           caller that sets it is describing the local model's behaviour, not
+           stating a requirement the run should fail without. So it is ignored
+           there rather than raising: the weekly `wiki_lint --deep` pass sets
+           LLM_PROVIDER=gemini in its own .plist and shares this entry point.
     """
     name = _provider(provider)
     if name == "gemini":
@@ -326,7 +332,8 @@ def run_agent(
             system_prompt, user_prompt, tools, dispatch, model, logger, max_iterations
         )
     return _run_ollama(
-        system_prompt, user_prompt, tools, dispatch, model, host, logger, max_iterations
+        system_prompt, user_prompt, tools, dispatch, model, host, logger,
+        max_iterations, think,
     )
 
 
@@ -480,7 +487,39 @@ def _run_ollama(
     host: str,
     logger: Optional[logging.Logger],
     max_iterations: int,
+    think: Optional[bool] = None,
 ) -> str:
+    """`think` controls whether the model reasons before answering.
+
+    None leaves the field off the request, which is the model's own default.
+    False turns reasoning off, and for a step that transcribes rather than
+    judges that is strictly better on both axes at once.
+
+    Measured on gemma4:26b-mlx against a real wiki_ingest stage-2 conversation,
+    rewriting the 95-line wiki/ollama.md, five trials:
+
+        thinking on   252.6s  13,035 tok  cut off  kept 23/95 original lines
+        thinking on   274.5s  12,903 tok  cut off  kept 52/95
+        thinking off   88.1s   3,923 tok  clean    kept 94/95
+        thinking off   75.1s   3,839 tok  clean    kept 94/95
+        thinking off   75.1s   3,875 tok  clean    kept 94/95
+
+    3.4x faster, and the accuracy runs the same way rather than against it. The
+    reasoning block is generated into the same num_predict budget as the reply,
+    so a long one leaves too little for the page body; the reply is then cut off
+    mid-write, and because write_wiki_page replaces whole files, what lands is a
+    short page over a real one. That is not hypothetical — the 2026-08-20 vault
+    snapshot recorded wiki/local-llm-agent.md at 22 insertions and 78 deletions,
+    an "update" that deleted most of the page. With thinking off nothing was cut
+    off in any trial, and the token count barely moved between runs (3,839 /
+    3,875 / 3,923) where thinking on ranged from 1,907 to 4,565 reasoning tokens
+    on the identical task.
+
+    None of which makes reasoning useless — it makes it a per-step choice. The
+    same benchmark against stage 1, which decides *which* pages a source should
+    touch, failed to call submit_plan at all in 3 of 6 trials with thinking off.
+    So the caller decides, one stage at a time; see wiki_ingest.py.
+    """
     model = _ollama_model(model)
     host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
     timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
@@ -492,16 +531,21 @@ def _run_ollama(
         {"role": "user", "content": user_prompt},
     ]
 
+    payload = {
+        "model": model,
+        "tools": tools,
+        "stream": False,
+        "options": options,
+    }
+    # Omitted entirely when the caller said nothing, so a model with no notion
+    # of thinking sees exactly the request it saw before this existed.
+    if think is not None:
+        payload["think"] = think
+
     for iteration in range(max_iterations):
         resp = _post_with_retry(
             f"{host}/api/chat",
-            {
-                "model": model,
-                "messages": messages,
-                "tools": tools,
-                "stream": False,
-                "options": options,
-            },
+            {**payload, "messages": messages},
             timeout=timeout,
             logger=logger,
         )

@@ -102,6 +102,31 @@ def test_every_stage_dispatches_every_tool_it_advertises(vault):
         assert set(dispatch) - advertised <= {"read_index"}
 
 
+def test_only_the_stages_that_transcribe_turn_thinking_off(vault, monkeypatch):
+    """Stages 2 and 3 are handed what to do and only have to carry it out, so
+    they run with reasoning off — 3.4x faster, and it stops the reasoning block
+    eating the reply budget and cutting a page write short. Stage 1 decides
+    which pages a source touches, and with reasoning off it returned without
+    calling submit_plan in half of a six-trial benchmark, so it keeps it."""
+    vault.raw("src.md")
+    seen = {}
+
+    def record(**kwargs):
+        dispatch = kwargs["dispatch"]
+        stage = (
+            "plan" if "submit_plan" in dispatch
+            else "execute" if "write_wiki_page" in dispatch
+            else "log"
+        )
+        seen[stage] = kwargs.get("think")
+        return _writes(**kwargs)
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", record)
+    wiki_ingest.ingest_vault(vault.path, _Logger())
+
+    assert seen == {"plan": None, "execute": False, "log": False}
+
+
 def test_planning_stage_has_no_tool_that_writes(vault):
     """What makes --plan-only safe by construction rather than by care."""
     dispatch = wiki_ingest._plan_dispatch(vault.path, wiki_ingest._Plan())
