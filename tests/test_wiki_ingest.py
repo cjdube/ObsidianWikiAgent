@@ -62,11 +62,18 @@ def _stages(pages=None, fail=(), dead_stage=None):
                 return "answered without planning"
             dispatch["submit_plan"](pages=[dict(p) for p in planned], skipped="")
             return "planned"
-        if "write_wiki_page" in dispatch:
+        if "write_wiki_page" in dispatch or "edit_wiki_page" in dispatch:
             name = _page_in_prompt(kwargs["user_prompt"])
             if dead_stage == "execute" or name in fail:
                 return "answered without writing"
-            dispatch["write_wiki_page"](name=name, content=f"# {name}\n")
+            # Whichever write tool this page's stage was given — the set depends
+            # on whether the page is already on disk.
+            if "edit_wiki_page" in dispatch:
+                dispatch["edit_wiki_page"](
+                    name=name, section="Notes", content=f"- from the source\n"
+                )
+            else:
+                dispatch["write_wiki_page"](name=name, content=f"# {name}\n")
             return "wrote"
         if dead_stage == "log":
             return "answered without logging"
@@ -92,9 +99,13 @@ def test_every_stage_dispatches_every_tool_it_advertises(vault):
     the index in prose still works."""
     from agent import wiki_tools as wt
 
+    counter = wiki_ingest._WriteCounter()
     for schemas, dispatch in (
         (wt.PLAN_TOOL_SCHEMAS, wiki_ingest._plan_dispatch(vault.path, wiki_ingest._Plan())),
-        (wt.EXECUTE_TOOL_SCHEMAS, wiki_ingest._execute_dispatch(vault.path, wiki_ingest._WriteCounter())),
+        (wt.CREATE_PAGE_TOOL_SCHEMAS,
+         wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=False)),
+        (wt.UPDATE_PAGE_TOOL_SCHEMAS,
+         wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=True)),
         (wt.LOG_TOOL_SCHEMAS, wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter())),
     ):
         advertised = {t["function"]["name"] for t in schemas}
@@ -137,13 +148,46 @@ def test_write_counter_ignores_a_refused_write(vault):
     """A refused reserved name comes back as an error result. Counting it as
     progress would mark a page done on a call that wrote nothing."""
     writes = wiki_ingest._WriteCounter()
-    dispatch = wiki_ingest._execute_dispatch(vault.path, writes)
+    dispatch = wiki_ingest._execute_dispatch(vault.path, "src.md", writes, exists=False)
 
     assert "error" in dispatch["write_wiki_page"](name="index", content="x")
     assert not writes
 
     assert "written" in dispatch["write_wiki_page"](name="real", content="# Real\n")
     assert writes
+
+
+def test_edit_counter_ignores_a_refused_edit(vault):
+    """The update path needs the same guarantee as the create path — a page that
+    isn't there is an error result, not progress."""
+    vault.page("real", "# Real\n\n**Sources**: a.md\n**Last updated**: 2026-01-01\n")
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._execute_dispatch(vault.path, "src.md", writes, exists=True)
+
+    assert "error" in dispatch["edit_wiki_page"](
+        name="ghost", section="S", content="x"
+    )
+    assert not writes
+
+    assert "edited" in dispatch["edit_wiki_page"](
+        name="real", section="Notes", content="- new fact\n"
+    )
+    assert writes
+
+
+def test_the_source_filename_is_not_the_models_to_supply(vault):
+    """RULES.md has a paragraph of rules about citing a source correctly — bare
+    filename, no directory prefix — and the sort step files sources into
+    raw/<folder>/. Binding it here means none of that can be got wrong."""
+    vault.page("real", "# Real\n\n**Sources**: a.md\n**Last updated**: 2026-01-01\n")
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "daily-ai/Chat-2026-08-20.md", wiki_ingest._WriteCounter(), True
+    )
+    dispatch["edit_wiki_page"](name="real", section="Notes", content="- fact\n")
+
+    text = (vault.root / "wiki" / "real.md").read_text()
+    assert "**Sources**: a.md, Chat-2026-08-20.md" in text
+    assert "daily-ai/" not in text
 
 
 # --- the plan the model submits is not trusted -----------------------------

@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 from typing import NamedTuple
 
@@ -346,6 +347,19 @@ def read_wiki_page(vault_path: str, name: str) -> dict:
     return {"content": path.read_text(encoding="utf-8")}
 
 
+def page_exists(vault_path: str, name: str) -> bool:
+    """Whether `name` is already a page in wiki/.
+
+    Not a model tool — this is how the ingest decides which stage-2 tool set a
+    page gets, and a name that would resolve outside wiki/ is answered False
+    rather than raising, because to that question it is simply not a page here.
+    """
+    try:
+        return _safe_page_path(vault_path, name).is_file()
+    except ValueError:
+        return False
+
+
 _FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---", re.DOTALL)
 
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
@@ -449,6 +463,220 @@ def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
     return {"written": path.name}
 
 
+_RELATED_SECTION = "Related pages"
+
+
+def _section_title(line: str) -> str | None:
+    """The heading text of a `## Section` line, or None for anything else."""
+    if not line.startswith("## "):
+        return None
+    return line[3:].strip()
+
+
+def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
+    """(heading index, end index) of `## section`, or None if it isn't there.
+
+    Shared by index.md and by wiki pages, which is why '## ' is the only thing
+    that counts as a section here. On a page that means a '### Subsection' does
+    not end its parent — appending to '## Tools' lands after the subsections
+    that belong to it, not in front of them — and it keeps one answer to "what
+    is a section" for the model, which picks these names out of
+    list_index_sections and out of the page it just read.
+    """
+    want = section.strip().lstrip("#").strip().casefold()
+    for i, line in enumerate(lines):
+        title = _section_title(line)
+        if title is not None and title.casefold() == want:
+            for j in range(i + 1, len(lines)):
+                if _section_title(lines[j]) is not None:
+                    return i, j
+            return i, len(lines)
+    return None
+
+
+# The longest real '## ' heading across this vault's 831 of them is 60
+# characters, and the median is 13. 80 leaves room for a longer one than any
+# page has yet without admitting a paragraph.
+_MAX_SECTION_CHARS = 80
+
+
+def _heading_like(section: str) -> bool:
+    """Whether `section` could plausibly be a new '## ' heading.
+
+    Guards the one direction that damages a page — creating a heading. Markdown
+    has no illegal heading text, so this is a shape test, not a validity one: a
+    heading is one short line, and it is not a list item.
+    """
+    return (
+        "\n" not in section
+        and len(section) <= _MAX_SECTION_CHARS
+        and not section.startswith(("-", "*", "+", ">", "|"))
+    )
+
+
+def _append_to_section(body: str, section: str, content: str) -> str:
+    """`body` with `content` added at the end of `section`, creating it if new.
+
+    A new section is placed before '## Related pages' rather than at the end,
+    because that list is the page's last word by the format in RULES.md. When
+    the page has no such list — or when the new section *is* it — the content
+    goes at the end, which is the same rule with nothing to sit in front of.
+    """
+    lines = body.split("\n")
+    bounds = _section_bounds(lines, section)
+    block = content.strip().split("\n")
+
+    if bounds:
+        start, end = bounds
+        # Back over the blank lines that separate this section from the next,
+        # so the addition joins the section's own content rather than the gap.
+        at = end
+        while at > start + 1 and not lines[at - 1].strip():
+            at -= 1
+        return "\n".join(lines[:at] + [""] + block + lines[at:])
+
+    related = _section_bounds(lines, _RELATED_SECTION)
+    new = [f"## {section.strip()}", ""] + block
+    before = lines[:related[0]] if related else lines
+    # One blank line before the new heading, however many the split left behind.
+    while before and not before[-1].strip():
+        before.pop()
+    rest = [""] + lines[related[0]:] if related else []
+    return "\n".join(before + [""] + new + rest)
+
+
+def _record_source(line: str, source: str) -> str:
+    """The '**Sources**:' line with `source` appended if it is not already named.
+
+    The bare filename, always. RULES.md asks for one with no directory prefix
+    and the sort step files sources into raw/<folder>/, so a caller that passes
+    the path it walked would write exactly the prefixed citation the rules call
+    out ('weekly-learnings/Strategic-Weekly-Review-2026-05-11.md'). Stripping it
+    here means no caller can get that wrong.
+
+    The existing text is appended to, never parsed and rebuilt. A raw filename
+    may itself contain a comma — this vault has
+    'if-you’re-still-hitting-the-claude-code-5-hour-wall,-you’re-doing-it-wrong.md'
+    — and splitting the list on ',' to rejoin it turned that one citation into
+    two invented ones, which is how wiki_lint found this. The separator is
+    comma-*space*, which that filename does not contain, so it is safe to split
+    on for the membership test; it is the rejoining that was never safe.
+    """
+    name = Path(source).name
+    prefix = "**Sources**:"
+    existing = line[len(prefix):]
+    if name in [s.strip() for s in existing.split(", ")]:
+        return line
+    if not existing.strip():
+        return f"{prefix} {name}"
+    return f"{line.rstrip()}, {name}"
+
+
+def edit_wiki_page(
+    vault_path: str,
+    source: str,
+    name: str,
+    section: str,
+    content: str,
+    summary: str = "",
+) -> dict:
+    """Add `content` to one section of an existing page, leaving the rest alone.
+
+    This is the update path. write_wiki_page replaces whole files, which made
+    every update cost a full regeneration of the page — and charged for that
+    twice over. Once in time: the 2026-08-21 run regenerated all 119 lines of
+    wiki/ollama.md to change 22 of them, and ~16,600 tokens of page body bought
+    59 insertions and 45 deletions across the whole run. Once in accuracy: text
+    the model re-emits is text it can damage, and it did, in both directions.
+    Whole lines went missing (wiki/local-llm-agent.md, 22 insertions and 78
+    deletions on 2026-08-20), and lines it was not even editing came back with
+    their JSON escaping baked in — the '\\u2014' and '\\"' that 25 pages now
+    carry are all survivors of a rewrite that had no reason to touch them.
+
+    Text that is never re-emitted cannot be lost or mangled, so the fix is to
+    stop re-emitting it. What the model supplies here is only the new material.
+
+    Three parts of the page are Python's rather than the model's, for the same
+    reason update_index owns index descriptions and write_wiki_page preserves
+    frontmatter — a guarantee belongs in code:
+
+      - '**Sources**' gains this ingest's source file, as a bare filename
+      - '**Last updated**' is set to today, so it can never be a placeholder,
+        a parenthetical, or the future date RULES.md forbids
+      - everything outside `section` is copied through untouched
+
+    `summary` is optional and replaces the '**Summary**:' line when given: a
+    page's one-line description does drift as the page grows, and it is the one
+    piece of existing text an update has a real reason to revise.
+
+    Returns 'unchanged' rather than appending when the content is already on the
+    page. Replacing a file is naturally idempotent and appending to one is not,
+    so a stage that runs twice — a retried conversation, a source re-ingested
+    after a failure — would otherwise leave the same paragraph on the page
+    twice.
+    """
+    try:
+        path = _safe_page_path(vault_path, name)
+    except ValueError as e:
+        return {"error": str(e)}
+    if path.name in RESERVED:
+        tool = "update_index" if path.name == "index.md" else "append_log"
+        return {
+            "error": f"'{path.name}' is not writable with edit_wiki_page — "
+                     f"use {tool} instead."
+        }
+    if not path.is_file():
+        return {
+            "error": f"wiki page '{name}' does not exist, so there is nothing "
+                     f"to add to. Check the name — this step updates a page "
+                     f"that is already in the wiki."
+        }
+
+    content = _decode_if_escaped(content)
+    if not content.strip():
+        return {"error": "content is empty — nothing to add to the page."}
+
+    original = path.read_text(encoding="utf-8")
+    block = _FRONTMATTER_RE.match(original)
+    head = block.group(0) if block else ""
+    body = original[len(head):]
+
+    if content.strip() in body:
+        return {"unchanged": path.name, "reason": "that content is already on the page"}
+
+    section = section.strip().lstrip("#").strip()
+    if not section:
+        return {
+            "error": "section is required — name the '## ' heading this goes "
+                     "under, e.g. 'Context Management'."
+        }
+    # A name that is already a heading on the page is always fine, however it
+    # reads. The check is only on the ones that would create a heading: the
+    # model sometimes passes a whole bullet here, and a page then grows a 319
+    # character '## - **LocalLLMAgent**: Included refactoring of...' with the
+    # real content filed under it. Observed once in 13 pages on 2026-08-21.
+    if _section_bounds(body.split("\n"), section) is None and not _heading_like(section):
+        return {
+            "error": f"'{section[:40]}…' is page content, not a section "
+                     f"heading. Pass a short heading like 'Context Management' "
+                     f"as 'section', and put the material in 'content'."
+        }
+
+    body = _append_to_section(body, section, content)
+
+    lines = body.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("**Sources**:"):
+            lines[i] = _record_source(line, source)
+        elif line.startswith("**Last updated**:"):
+            lines[i] = f"**Last updated**: {date.today().isoformat()}"
+        elif summary.strip() and line.startswith("**Summary**:"):
+            lines[i] = f"**Summary**: {_decode_if_escaped(summary).strip()}"
+
+    path.write_text(head + "\n".join(lines), encoding="utf-8")
+    return {"edited": path.name, "section": section.strip()}
+
+
 def read_index(vault_path: str) -> dict:
     path = _wiki_dir(vault_path) / "index.md"
     if not path.is_file():
@@ -457,13 +685,6 @@ def read_index(vault_path: str) -> dict:
 
 
 UNFILED_HEADING = "## Unfiled"
-
-
-def _section_title(line: str) -> str | None:
-    """The heading text of a `## Section` line, or None for anything else."""
-    if not line.startswith("## "):
-        return None
-    return line[3:].strip()
 
 
 def list_index_sections(vault_path: str) -> dict:
@@ -645,19 +866,6 @@ def _file_into_section(body: list[str], entry: str) -> list[str]:
     return kept + ([""] if kept else []) + run
 
 
-def _section_bounds(lines: list[str], section: str) -> tuple[int, int] | None:
-    """(heading index, end index) of `## section`, or None if it isn't there."""
-    want = section.strip().lstrip("#").strip().casefold()
-    for i, line in enumerate(lines):
-        title = _section_title(line)
-        if title is not None and title.casefold() == want:
-            for j in range(i + 1, len(lines)):
-                if _section_title(lines[j]) is not None:
-                    return i, j
-            return i, len(lines)
-    return None
-
-
 def update_index(vault_path: str, page: str, section: str) -> dict:
     """File ONE page under ONE section heading. Python owns the document.
 
@@ -836,6 +1044,24 @@ WRITE_WIKI_PAGE_SCHEMA = {
     },
 }
 
+EDIT_WIKI_PAGE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "edit_wiki_page",
+        "description": "Add new material to ONE section of an existing wiki page. Send only what is new — the rest of the page is kept exactly as it is, so you must NOT repeat, restate, or re-send any text that is already on the page. The '**Sources**' and '**Last updated**' lines are updated for you; do not write them.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Page name, e.g. 'ollama' (with or without .md)."},
+                "section": {"type": "string", "description": "The '## ' heading to add this under — a few words, never a sentence and never the material itself, e.g. 'Context Management'. Use one the page already has where it fits; a new section is created if not. Use 'Related pages' to add a [[wiki-link]] to the page's outward links."},
+                "content": {"type": "string", "description": "ONLY the new markdown to add — usually a bullet or a short paragraph. Never the whole page, and never a line that is already on it."},
+                "summary": {"type": "string", "description": "Optional. A replacement for the page's one-line '**Summary**:' if this material changes what the page is about. Leave it out otherwise."},
+            },
+            "required": ["name", "section", "content"],
+        },
+    },
+}
+
 READ_INDEX_SCHEMA = {
     "type": "function",
     "function": {
@@ -936,10 +1162,29 @@ PLAN_TOOL_SCHEMAS = [
 # already answered that, and re-listing 418 names per page would reintroduce the
 # largest single item in the old single-pass context, once per page instead of
 # once per source.
-EXECUTE_TOOL_SCHEMAS = [
+#
+# Two sets, and which one a page gets is decided by whether it is already on
+# disk (see wiki_ingest._execute_unit) rather than by what the plan called the
+# action. The plan is a guess made before anything was read — _clean_plan_pages
+# says as much, defaulting an unclear action to 'update' — while the file either
+# exists or it does not.
+#
+# The split is the point, not a convenience. A page that exists is offered no
+# way to be overwritten, so the whole-file rewrite that used to lose lines and
+# bake in escaping cannot happen on an update at all; a page that does not exist
+# is offered no way to be edited, which would only fail. Neither set can do the
+# other's job, so the model cannot pick wrong.
+CREATE_PAGE_TOOL_SCHEMAS = [
     READ_RAW_FILE_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     WRITE_WIKI_PAGE_SCHEMA,
+    UPDATE_INDEX_SCHEMA,
+]
+
+UPDATE_PAGE_TOOL_SCHEMAS = [
+    READ_RAW_FILE_SCHEMA,
+    READ_WIKI_PAGE_SCHEMA,
+    EDIT_WIKI_PAGE_SCHEMA,
     UPDATE_INDEX_SCHEMA,
 ]
 

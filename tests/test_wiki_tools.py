@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -220,7 +221,8 @@ def test_list_index_sections_agrees_with_section_bounds(vault):
 
 def test_no_ingest_stage_offers_the_whole_index():
     """The token saving only lands if read_index is un-advertised."""
-    for schemas in (wt.PLAN_TOOL_SCHEMAS, wt.EXECUTE_TOOL_SCHEMAS, wt.LOG_TOOL_SCHEMAS):
+    for schemas in (wt.PLAN_TOOL_SCHEMAS, wt.CREATE_PAGE_TOOL_SCHEMAS,
+                    wt.UPDATE_PAGE_TOOL_SCHEMAS, wt.LOG_TOOL_SCHEMAS):
         assert "read_index" not in [t["function"]["name"] for t in schemas]
     assert "list_index_sections" in [
         t["function"]["name"] for t in wt.PLAN_TOOL_SCHEMAS
@@ -243,12 +245,29 @@ def test_planning_stage_cannot_read_or_write_pages():
 def test_execute_stage_does_not_relist_every_page():
     """418 page names is the largest item in the old context. Re-listing it once
     per planned page would be worse than the problem being fixed."""
-    names = [t["function"]["name"] for t in wt.EXECUTE_TOOL_SCHEMAS]
-    assert "list_wiki_pages" not in names
-    assert "submit_plan" not in names
-    # append_log is stage 3's alone — it is the one non-idempotent tool, and a
-    # per-page stage would append once per page instead of once per source.
-    assert "append_log" not in names
+    for schemas in (wt.CREATE_PAGE_TOOL_SCHEMAS, wt.UPDATE_PAGE_TOOL_SCHEMAS):
+        names = [t["function"]["name"] for t in schemas]
+        assert "list_wiki_pages" not in names
+        assert "submit_plan" not in names
+        # append_log is stage 3's alone — it is the one non-idempotent tool, and
+        # a per-page stage would append once per page instead of once per source.
+        assert "append_log" not in names
+
+
+def test_a_page_that_exists_is_offered_no_way_to_be_overwritten():
+    """The whole point of the split. write_wiki_page replaces the file, which is
+    how updates lost lines and baked in escaping; an update never sees it, and a
+    create never sees the edit tool that would only fail on a missing page."""
+    update = [t["function"]["name"] for t in wt.UPDATE_PAGE_TOOL_SCHEMAS]
+    create = [t["function"]["name"] for t in wt.CREATE_PAGE_TOOL_SCHEMAS]
+
+    assert "write_wiki_page" not in update
+    assert "edit_wiki_page" in update
+    assert "edit_wiki_page" not in create
+    assert "write_wiki_page" in create
+    # Both still read the source, read the page, and file it.
+    for names in (update, create):
+        assert {"read_raw_file", "read_wiki_page", "update_index"} <= set(names)
 
 
 def test_query_dispatch_covers_exactly_the_query_schemas(vault):
@@ -696,6 +715,255 @@ def test_write_wiki_page_keeps_frontmatter_when_the_body_opens_with_a_rule(vault
     assert written.startswith(FRONTMATTER)
     assert "lens: true" in written
     assert "New body." in written
+
+
+# --- edit_wiki_page ---------------------------------------------------------
+
+PAGE = """\
+# Ollama
+
+**Summary**: A tool for running local models.
+**Sources**: AI-Chat-2026-07-01.md
+**Last updated**: 2026-07-01
+
+---
+
+## Context Management
+
+- num_ctx is pinned (source: AI-Chat-2026-07-01.md).
+
+### Overflow
+
+- Ollama drops the oldest messages.
+
+## Related pages
+
+- [[gemma-4]]
+"""
+
+
+def _edit(vault, **kw):
+    kw.setdefault("source", "Chat-2026-08-21.md")
+    kw.setdefault("name", "ollama")
+    return wt.edit_wiki_page(vault.path, kw.pop("source"), **kw)
+
+
+def test_edit_appends_to_an_existing_section(vault):
+    vault.page("ollama", PAGE)
+    result = _edit(vault, section="Context Management", content="- New fact.")
+
+    assert result == {"edited": "ollama.md", "section": "Context Management"}
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    # Lands after the subsection that belongs to the parent, not in front of it.
+    assert text.index("- New fact.") > text.index("Ollama drops the oldest")
+    assert text.index("- New fact.") < text.index("## Related pages")
+
+
+def test_edit_leaves_every_other_line_byte_identical(vault):
+    """The whole reason this tool exists. Text the model never re-emits is text
+    it cannot lose or bake JSON escaping into."""
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Context Management", content="- New fact.")
+
+    before = [l for l in PAGE.split("\n") if l.strip()]
+    after = (vault.root / "wiki" / "ollama.md").read_text()
+    untouched = [
+        l for l in before
+        if not l.startswith(("**Sources**:", "**Last updated**:"))
+    ]
+    for line in untouched:
+        assert line in after, f"lost: {line!r}"
+
+
+def test_edit_creates_a_missing_section_before_related_pages(vault):
+    """'## Related pages' is the page's last word per RULES.md."""
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Truncation", content="- done_reason is 'length'.")
+
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    assert "## Truncation" in text
+    assert text.index("## Truncation") < text.index("## Related pages")
+
+
+def test_edit_separates_a_new_section_with_exactly_one_blank_line(vault):
+    """Obsidian renders it either way, but a page that grows a blank line per
+    ingest drifts away from the format every other page keeps."""
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Truncation", content="- done_reason is 'length'.")
+
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    assert "\n\n\n" not in text
+    assert "\n\n## Truncation\n\n- done_reason" in text
+    assert "\n\n## Related pages\n" in text
+
+
+def test_edit_creates_a_missing_section_at_the_end_without_related_pages(vault):
+    vault.page("plain", "# Plain\n\n**Sources**: a.md\n**Last updated**: 2026-01-01\n")
+    _edit(vault, name="plain", section="Notes", content="- A note.")
+
+    text = (vault.root / "wiki" / "plain.md").read_text()
+    assert text.rstrip().endswith("- A note.")
+
+
+def test_edit_adds_a_related_link_through_the_same_mechanism(vault):
+    """A back-link is the commonest update in a plan, and it needs no special
+    case — 'Related pages' is just a section."""
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Related pages", content="- [[num-predict]]")
+
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    assert "- [[gemma-4]]" in text
+    assert "- [[num-predict]]" in text
+
+
+def test_edit_records_the_source_and_stamps_the_date(vault):
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Context Management", content="- New fact.")
+
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    assert "**Sources**: AI-Chat-2026-07-01.md, Chat-2026-08-21.md" in text
+    assert f"**Last updated**: {date.today().isoformat()}" in text
+
+
+def test_edit_does_not_list_the_same_source_twice(vault):
+    vault.page("ollama", PAGE)
+    _edit(vault, source="AI-Chat-2026-07-01.md",
+          section="Context Management", content="- New fact.")
+
+    # Counted on the Sources line alone — the body legitimately cites the same
+    # file inline, and that is not a duplicate.
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    sources = next(l for l in text.split("\n") if l.startswith("**Sources**:"))
+    assert sources == "**Sources**: AI-Chat-2026-07-01.md"
+
+
+def test_edit_keeps_a_source_filename_that_contains_a_comma(vault):
+    """This vault really has one. Splitting the Sources list on ',' to rejoin it
+    turned that single citation into two invented ones, which wiki_lint then
+    reported as sources that are not files in raw/."""
+    awkward = "if-you’re-still-hitting-the-5-hour-wall,-you’re-doing-it-wrong.md"
+    vault.page("ollama", PAGE.replace(
+        "**Sources**: AI-Chat-2026-07-01.md",
+        f"**Sources**: AI-Chat-2026-07-01.md, {awkward}",
+    ))
+
+    _edit(vault, section="Context Management", content="- New fact.")
+
+    sources = next(
+        l for l in (vault.root / "wiki" / "ollama.md").read_text().split("\n")
+        if l.startswith("**Sources**:")
+    )
+    assert awkward in sources
+    assert sources.endswith("Chat-2026-08-21.md")
+
+
+def test_edit_does_not_reflow_the_sources_line_it_appends_to(vault):
+    """Whatever spacing the line already had is the page's, not this tool's."""
+    vault.page("ollama", PAGE.replace(
+        "**Sources**: AI-Chat-2026-07-01.md",
+        "**Sources**: a.md,b.md, c.md",
+    ))
+
+    _edit(vault, section="Context Management", content="- New fact.")
+
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    assert "**Sources**: a.md,b.md, c.md, Chat-2026-08-21.md" in text
+
+
+def test_edit_replaces_the_summary_only_when_given_one(vault):
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Context Management", content="- A.")
+    assert "**Summary**: A tool for running local models." in (
+        vault.root / "wiki" / "ollama.md").read_text()
+
+    _edit(vault, section="Context Management", content="- B.", summary="Revised.")
+    assert "**Summary**: Revised." in (vault.root / "wiki" / "ollama.md").read_text()
+
+
+def test_edit_is_idempotent_on_content_already_present(vault):
+    """Replacing a file is naturally idempotent; appending is not. A retried
+    conversation must not leave the same paragraph on the page twice."""
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Context Management", content="- New fact.")
+    first = (vault.root / "wiki" / "ollama.md").read_text()
+
+    result = _edit(vault, section="Context Management", content="- New fact.")
+
+    assert "unchanged" in result
+    assert (vault.root / "wiki" / "ollama.md").read_text() == first
+
+
+def test_edit_preserves_frontmatter(vault):
+    vault.page("ai-slop", FRONTMATTER + "\n\n# AI Slop\n\n**Sources**: a.md\n"
+                                        "**Last updated**: 2026-01-01\n")
+    _edit(vault, name="ai-slop", section="Notes", content="- A note.")
+
+    text = (vault.root / "wiki" / "ai-slop.md").read_text()
+    assert text.startswith(FRONTMATTER)
+    assert "lens: true" in text
+
+
+def test_edit_decodes_content_the_model_double_encoded(vault):
+    """Same guard write_wiki_page has. It is the escaping that leaked into 25
+    pages, and it must not survive on the path that replaced it."""
+    vault.page("ollama", PAGE)
+    _edit(vault, section="Notes", content='- A \\"quoted\\" line.\\n- Second.')
+
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    assert '- A "quoted" line.' in text
+    assert "\\n" not in text
+
+
+def test_edit_refuses_page_content_passed_as_a_section_name(vault):
+    """Seen once in 13 pages on 2026-08-21: the model put a whole bullet in
+    'section', and the page grew a 319-character heading with the real material
+    filed under it. Markdown accepts that, so only this can refuse it."""
+    vault.page("ollama", PAGE)
+    bullet = "- **LocalLLMAgent**: " + "Continued progress with servers. " * 8
+
+    result = _edit(vault, section=bullet, content="- A fact.")
+
+    assert "not a section heading" in result["error"]
+    assert "## - **LocalLLMAgent**" not in (
+        vault.root / "wiki" / "ollama.md").read_text()
+
+
+def test_edit_still_appends_to_a_long_heading_the_page_already_has(vault):
+    """The shape test guards heading *creation*. A heading already on the page
+    is the page's own, whatever it looks like, and must stay reachable."""
+    long_heading = "A Heading That Someone Wrote By Hand And Made Much Longer Than Sixty Characters"
+    vault.page("ollama", PAGE.replace("## Context Management", f"## {long_heading}"))
+
+    result = _edit(vault, section=long_heading, content="- A fact.")
+
+    assert "edited" in result
+    text = (vault.root / "wiki" / "ollama.md").read_text()
+    assert text.count(f"## {long_heading}") == 1
+
+
+def test_edit_refuses_a_page_that_does_not_exist(vault):
+    result = _edit(vault, name="ghost", section="Notes", content="- x")
+    assert "does not exist" in result["error"]
+    assert not (vault.root / "wiki" / "ghost.md").exists()
+
+
+def test_edit_refuses_empty_content(vault):
+    vault.page("ollama", PAGE)
+    assert "empty" in _edit(vault, section="Notes", content="   ")["error"]
+
+
+@pytest.mark.parametrize("name,tool", [("index", "update_index"), ("log", "append_log")])
+def test_edit_refuses_the_files_python_owns(vault, name, tool):
+    """Same two names write_wiki_page refuses, for the same reasons — the index
+    rebuilds itself, the log does not come back."""
+    vault.page(name, "# X\n")
+    result = _edit(vault, name=name, section="Notes", content="- x")
+    assert tool in result["error"]
+
+
+def test_edit_refuses_a_nested_name(vault):
+    result = _edit(vault, name="topics/foo", section="Notes", content="- x")
+    assert "nest" in result["error"]
 
 
 def test_write_wiki_page_rejects_a_nested_name(vault):

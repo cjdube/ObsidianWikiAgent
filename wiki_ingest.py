@@ -40,11 +40,13 @@ from agent.common import setup_logger, trim_launchd_log
 from agent.loop import complete_text, run_agent
 from agent.notify import notify_failure
 from agent.wiki_tools import (
-    EXECUTE_TOOL_SCHEMAS,
+    CREATE_PAGE_TOOL_SCHEMAS,
     LOG_TOOL_SCHEMAS,
     PLAN_TOOL_SCHEMAS,
     RESERVED,
+    UPDATE_PAGE_TOOL_SCHEMAS,
     append_log,
+    edit_wiki_page,
     get_ingested_sources,
     list_binary_raw_files,
     list_index_sections,
@@ -53,6 +55,7 @@ from agent.wiki_tools import (
     list_wiki_pages,
     mark_ingested,
     move_raw_file,
+    page_exists,
     parse_raw_folders,
     read_index,
     read_raw_file,
@@ -177,35 +180,61 @@ which link to add. Links out of a new page are only half the connection.
 Do not call submit_plan more than once. Do not write page content in the \
 'intent' field — one sentence saying what changes is all that is needed."""
 
-EXECUTE_WRAPPER = """
+_EXECUTE_PREAMBLE = """
 
 ## Your task right now
 
 You are step 2 of 3. You are handling ONE page, named in the message below. \
 Every other page in the plan is handled by its own separate step — do not \
-write, read, or edit any page except the one you were given.
+write, read, or edit any page except the one you were given."""
+
+_EXECUTE_COMMON = """
+Then stop. Do not append to the log — a later step does that for the whole \
+source at once.
+
+The source filename is NOT a wiki page name. Cite it as plain text in inline \
+citations, exactly as given. Never write it as a wiki-link. Wiki-links point \
+only at page slugs from the list below — lowercase with hyphens — so \
+`[[ai-chat-learnings-2026-08-19]]`, never `[[AI-Chat-Learnings-2026-08-19.md]]`.
+
+Keep the page focused. If it is getting long, the material probably belongs on \
+one of the other pages in the plan, and that page's own step will handle it."""
+
+CREATE_WRAPPER = _EXECUTE_PREAMBLE + """
+
+This page does not exist yet, so you are writing it from nothing.
 
 1. Read the source document for the material this page needs.
-2. If the action is 'update', read the page first. write_wiki_page replaces the \
-whole file, so anything already on the page that is still true must be carried \
-forward into what you write. Everything you leave out is deleted.
-3. Call write_wiki_page once with the complete page, following the vault's page \
+2. Call write_wiki_page once with the complete page, following the vault's page \
 format above.
+3. Call update_index once, naming this page and its section. Do not write a \
+description — it is taken from the page's own Summary line. Never send the whole \
+index; you are naming one page's home, not rewriting the file.
+""" + _EXECUTE_COMMON
+
+UPDATE_WRAPPER = _EXECUTE_PREAMBLE + """
+
+This page already exists. You are ADDING to it, not rewriting it. Everything \
+already on the page stays exactly as it is — you cannot damage it, because you \
+are not sending it.
+
+1. Read the source document for the material this page needs.
+2. Read the page, so you can see what it already covers and where your material \
+belongs. Anything the page already says, you do not say again.
+3. Call edit_wiki_page once. Send ONLY the new material — usually a bullet or a \
+short paragraph — and name the section it goes under. Do not repeat any \
+sentence that is already on the page, and do not send the page back to me.
 4. Call update_index once, naming this page and its section. Do not write a \
 description — it is taken from the page's own Summary line. Never send the whole \
 index; you are naming one page's home, not rewriting the file.
 
-Then stop. Do not append to the log — a later step does that for the whole \
-source at once.
+The `**Sources**` and `**Last updated**` lines are maintained for you. Do not \
+write them, and do not include them in what you send.
 
-The source filename is NOT a wiki page name. Cite it as plain text in the \
-`**Sources**` line and in inline citations, exactly as given. Never write it as \
-a wiki-link. Wiki-links point only at page slugs from the list below — lowercase \
-with hyphens — so `[[ai-chat-learnings-2026-08-19]]`, never \
-`[[AI-Chat-Learnings-2026-08-19.md]]`.
-
-Keep the page focused. If it is getting long, the material probably belongs on \
-one of the other pages in the plan, and that page's own step will handle it."""
+If this page's job in the plan is only to gain a link back to a new page, that \
+is a one-line edit: add `- [[that-page]]` under the 'Related pages' section, \
+with a sentence elsewhere only if the source supports one.
+""" + _EXECUTE_COMMON
 
 LOG_WRAPPER = """
 
@@ -326,24 +355,49 @@ def _plan_dispatch(vault_path: str, plan: _Plan) -> dict:
     }
 
 
-def _execute_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
-    """Stage 2's tools, for one planned page."""
-    def _tracked_write_wiki_page(**kwargs):
-        result = write_wiki_page(vault_path, **kwargs)
-        # Only a write that landed counts. A refused reserved name comes back
-        # as an error result, and treating that as progress would mark a page
-        # done on the strength of a call that wrote nothing.
-        if "error" not in result:
-            writes.count += 1
-        return result
+def _execute_dispatch(
+    vault_path: str, source: str, writes: _WriteCounter, exists: bool
+) -> dict:
+    """Stage 2's tools, for one planned page.
 
-    return {
+    Mirrors the schema split in agent/wiki_tools.py: an existing page gets
+    edit_wiki_page and no way to overwrite itself, a new one gets
+    write_wiki_page and no way to edit what is not there. Advertising a tool
+    that is not dispatchable costs an iteration and confuses the model, so the
+    two must be chosen together — test_every_stage_dispatches_every_tool_it
+    _advertises holds them to it.
+
+    The source filename is bound here rather than asked of the model. It is the
+    citation that goes on the page's '**Sources**' line, this function is the
+    only thing that reliably knows it, and RULES.md has a paragraph of rules
+    about writing it correctly that no longer has to be obeyed by anyone.
+    """
+    def _counted(fn):
+        def call(**kwargs):
+            result = fn(**kwargs)
+            # Only a call that landed counts. A refused reserved name comes back
+            # as an error result, and treating that as progress would mark a
+            # page done on the strength of a call that wrote nothing.
+            if "error" not in result:
+                writes.count += 1
+            return result
+        return call
+
+    tools = {
         "read_raw_file": functools.partial(read_raw_file, vault_path),
         "read_wiki_page": functools.partial(read_wiki_page, vault_path),
-        "write_wiki_page": _tracked_write_wiki_page,
         "update_index": functools.partial(update_index, vault_path),
         "read_index": functools.partial(read_index, vault_path),
     }
+    if exists:
+        tools["edit_wiki_page"] = _counted(
+            functools.partial(edit_wiki_page, vault_path, source)
+        )
+    else:
+        tools["write_wiki_page"] = _counted(
+            functools.partial(write_wiki_page, vault_path)
+        )
+    return tools
 
 
 def _log_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
@@ -514,15 +568,26 @@ def _execute_unit(
     writes = _WriteCounter()
     siblings = [n for n in plan.names() if n != unit["name"]]
 
+    # Disk, not the plan. _clean_plan_pages defaults an unclear action to
+    # 'update', which was the safe guess when both paths ran the same tool; now
+    # the two paths are different tools, and a page that exists must never be
+    # offered the one that replaces it. The file is the only thing that knows.
+    exists = page_exists(vault_path, unit["name"])
+    wrapper = UPDATE_WRAPPER if exists else CREATE_WRAPPER
+    schemas = UPDATE_PAGE_TOOL_SCHEMAS if exists else CREATE_PAGE_TOOL_SCHEMAS
+    # Correct the plan's guess in place, so stage 3 reports what happened rather
+    # than what was predicted — `unit` is the same dict _ingest_source collects
+    # into `done` and hands to _write_log_entry.
+    unit["action"] = "update" if exists else "create"
+
     def run() -> bool:
         writes.count = 0
         result = run_agent(
-            system_prompt=rules + UNATTENDED_WRAPPER + EXECUTE_WRAPPER,
+            system_prompt=rules + UNATTENDED_WRAPPER + wrapper,
             user_prompt=(
                 f"Source file to cite (plain text, never a wiki-link): "
                 f"'{filename}'\n"
                 f"Page to write: '{unit['name']}'\n"
-                f"Action: {unit['action']}\n"
                 f"What this page needs from the source: {unit['intent']}\n"
                 f"Index section: {unit['section']}\n\n"
                 "Other pages being written from this same source, by their own "
@@ -531,8 +596,8 @@ def _execute_unit(
                 "not duplicate what they cover: "
                 + (", ".join(f"[[{n}]]" for n in siblings) if siblings else "none")
             ),
-            tools=EXECUTE_TOOL_SCHEMAS,
-            dispatch=_execute_dispatch(vault_path, writes),
+            tools=schemas,
+            dispatch=_execute_dispatch(vault_path, filename, writes, exists),
             logger=logger,
             max_iterations=MAX_EXECUTE_ITERATIONS,
             think=False,
