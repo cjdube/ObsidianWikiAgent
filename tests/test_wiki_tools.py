@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent import wiki_tools as wt
+from agent.wikilinks import lowercase_targets
 
 
 # --- path safety -----------------------------------------------------------
@@ -1124,3 +1125,89 @@ def test_write_wiki_page_still_allows_ordinary_names(vault):
     """The guard is two filenames, not a prefix match — 'indexing' is a page."""
     assert "written" in wt.write_wiki_page(vault.path, "indexing", "# Indexing\n")
     assert "written" in wt.write_wiki_page(vault.path, "logging", "# Logging\n")
+
+
+# --- link and page-name case ----------------------------------------------
+
+
+def test_lowercase_targets_slugs_the_link_the_model_copies_from_a_filename():
+    """The 2026-08-24 finding: 13 links named after the raw source file, all
+    reported broken against pages that existed under their lowercase slug."""
+    content = "## Related pages\n\n- [[Daily-Chrome-2026-08-22]]\n"
+    assert lowercase_targets(content) == (
+        "## Related pages\n\n- [[daily-chrome-2026-08-22]]\n", 1
+    )
+
+
+def test_lowercase_targets_leaves_the_alias_and_anchor_alone():
+    """Only the part that names a page is a slug — the rest is prose a reader
+    sees, and lower-casing it would rewrite the page's visible text."""
+    content = "[[model-context-protocol|MCP]] and [[groceryguru#Confirmed state]]"
+    assert lowercase_targets(content) == (content, 0)
+    assert lowercase_targets("[[Foo-Bar|Foo Bar's]] and [[Baz-Qux#Heading Text]]") == (
+        "[[foo-bar|Foo Bar's]] and [[baz-qux#Heading Text]]", 2
+    )
+
+
+def test_lowercase_targets_matches_what_the_other_link_rewrites_match():
+    """LINK_RE excludes backticks *inside* the brackets — that guard is against
+    an unclosed `[[` running away, not against a whole link wrapped in a code
+    span, which still matches. delink_broken and strip_links_to rewrite such a
+    link too, so this one does as well: a normalise that skipped what they
+    rewrite is the check/fix drift agent/wikilinks.py exists to prevent."""
+    content = "A page reference reads `[[Daily-Chrome-2026-08-22]]` in the source."
+    assert lowercase_targets(content) == (
+        "A page reference reads `[[daily-chrome-2026-08-22]]` in the source.", 1
+    )
+    # The guard LINK_RE does carry: a backtick inside the brackets, no match.
+    assert lowercase_targets("Unclosed `[[` brackets and [[Foo]] after") == (
+        "Unclosed `[[` brackets and [[foo]] after", 1
+    )
+
+
+def test_write_wiki_page_lowercases_the_links_in_the_body(vault):
+    wt.write_wiki_page(vault.path, "qwen", "# Qwen\n\n- [[AI-Chat-Learnings-2026-08-23]]\n")
+    written = (vault.root / "wiki" / "qwen.md").read_text()
+    assert "[[ai-chat-learnings-2026-08-23]]" in written
+    assert "AI-Chat-Learnings" not in written
+
+
+def test_write_wiki_page_lowercases_a_link_the_escape_decode_reveals(vault):
+    """The normalise runs after _decode_if_escaped, so an escaped body's links
+    are not missed the way they would be if it ran first."""
+    wt.write_wiki_page(vault.path, "qwen", "# Qwen\\n\\n- [[Daily-Chrome-2026-08-22]]\\n")
+    assert "[[daily-chrome-2026-08-22]]" in (vault.root / "wiki" / "qwen.md").read_text()
+
+
+def test_edit_wiki_page_lowercases_the_links_it_adds(vault):
+    vault.page("qwen", "# Qwen\n\n**Sources**: a.md\n**Last updated**: 2026-08-01\n\n## Notes\n\nOld.\n")
+    wt.edit_wiki_page(vault.path, "b.md", "qwen", "Notes", "- [[Daily-Chrome-2026-08-22]]")
+    assert "[[daily-chrome-2026-08-22]]" in (vault.root / "wiki" / "qwen.md").read_text()
+
+
+def test_edit_wiki_page_still_reports_unchanged_after_the_case_fix(vault):
+    """The normalise runs before the already-on-the-page check, so a re-ingest
+    that re-sends the same uppercase link does not append it a second time."""
+    vault.page("qwen", "# Qwen\n\n**Sources**: a.md\n**Last updated**: 2026-08-01\n\n## Notes\n\nOld.\n")
+    wt.edit_wiki_page(vault.path, "b.md", "qwen", "Notes", "- [[Daily-Chrome-2026-08-22]]")
+    again = wt.edit_wiki_page(vault.path, "b.md", "qwen", "Notes", "- [[Daily-Chrome-2026-08-22]]")
+    assert "unchanged" in again
+
+
+def test_safe_page_path_lowercases_the_page_name(vault):
+    """wiki/AI-Chat-Learnings-2026-08-21.md, named after its source rather
+    than slugged from it, is how one uppercase page file got onto the vault."""
+    assert wt._safe_page_path(vault.path, "AI-Chat-Learnings-2026-08-21").name == (
+        "ai-chat-learnings-2026-08-21.md"
+    )
+    assert "written" in wt.write_wiki_page(vault.path, "Daily-Chrome-2026-08-22", "# x\n")
+    assert (vault.root / "wiki" / "daily-chrome-2026-08-22.md").is_file()
+
+
+def test_write_wiki_page_refuses_a_reserved_name_in_any_case(vault):
+    """RESERVED is compared against the resolved filename, so the lower-casing
+    is also what stops 'Index.md' walking past the guard and truncating it."""
+    original = "# Index\n\n- [[colima]] A container runtime.\n"
+    vault.index(original)
+    assert "error" in wt.write_wiki_page(vault.path, "Index.md", "# Clobbered\n")
+    assert (vault.root / "wiki" / "index.md").read_text() == original

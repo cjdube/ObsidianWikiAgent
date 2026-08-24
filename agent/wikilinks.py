@@ -92,3 +92,45 @@ def strip_links_to(content: str, slug: str) -> tuple[str, int]:
     """Flatten any link `content` makes to `slug` itself. A page linking to
     itself is never meaningful, so it becomes its plain display text."""
     return flatten_links(content, lambda target: target == slug)
+
+
+def lowercase_targets(content: str) -> tuple[str, int]:
+    """Lower-case the page stem of every [[link]], returning the new content
+    and the count rewritten. The alias and the '#heading' anchor are left
+    exactly as written — only the part that names a page is touched.
+
+    RULES.md has always asked for lowercase-hyphenated slugs, in both
+    directions ("Wiki-links point at real page slugs, lowercase with hyphens"
+    and "Keep page names lowercase with hyphens"). The model reads a source
+    called raw/daily-chrome/Daily-Chrome-2026-08-22.md, and writes
+    [[Daily-Chrome-2026-08-22]] into the page's Related pages list anyway: it
+    copies the filename it was handed rather than deriving the slug. Thirteen
+    such links were on the vault on 2026-08-24, across two source families.
+
+    They are worse than untidy. On a case-insensitive filesystem Obsidian will
+    open one, so nothing looks wrong — but the name it matches is ambiguous
+    between wiki/daily-chrome-2026-08-22.md and the raw source of nearly the
+    same name, and wiki_lint's check_links compares exactly, so all thirteen
+    reported as broken links to pages that in fact existed. A link that
+    resolves for a human and not for the graph is the failure this vault can
+    least afford.
+
+    Asking the prompt again was not an option: the rule is already there twice
+    and was already ignored, which is the same ground update_index and
+    write_wiki_page stand on — a guarantee belongs in code. Unconditional
+    rather than only-when-the-target-exists, because during an ingest the page
+    a link points at is frequently written later in the same run; a check
+    against what is on disk now would pass over exactly the new links this
+    exists to fix."""
+    count = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal count
+        head, bar, alias = m.group(1).partition("|")
+        stem, hash_, anchor = head.partition("#")
+        if stem == stem.lower():
+            return m.group(0)
+        count += 1
+        return f"[[{stem.lower()}{hash_}{anchor}{bar}{alias}]]"
+
+    return LINK_RE.sub(repl, content), count

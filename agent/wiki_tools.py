@@ -37,6 +37,7 @@ from agent.wikilinks import (
     flatten_links,
     link_target,
     linked_page_names,
+    lowercase_targets,
 )
 
 
@@ -70,8 +71,19 @@ def _safe_page_path(vault_path: str, name: str) -> Path:
     refused it with "no wiki page named 'topics/foo'". A write that lands
     where nothing reads is worse than a refused one, which at least tells the
     model to pick another name. wiki/ is flat by design; this makes it so.
+
+    The name is lower-cased on the way through, which RULES.md asks for ("Keep
+    page names lowercase with hyphens") and the model mostly but not always
+    does: wiki/AI-Chat-Learnings-2026-08-21.md sat among 437 lowercase pages on
+    2026-08-24, named after the raw source file rather than slugged from it.
+    Doing it here rather than in write_wiki_page keeps writing, reading and
+    page_exists agreeing about which file a name means, and closes a second
+    hole on the way — RESERVED is compared against this filename, so before
+    this a page named 'Index.md' walked past the guard that exists to stop
+    write_wiki_page truncating the index.
     """
     filename = name if name.endswith(".md") else f"{name}.md"
+    filename = filename.lower()
     wiki_dir = _wiki_dir(vault_path).resolve()
     candidate = (wiki_dir / filename).resolve()
     if wiki_dir not in candidate.parents:
@@ -506,6 +518,8 @@ def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
     # Before the frontmatter check, which an escaped body would pass falsely:
     # "---\nproject: true..." starts with '---' without holding a real block.
     content = _decode_if_escaped(content)
+    # After the decode, so a link the decode reveals is normalised too.
+    content, _ = lowercase_targets(content)
     # Matched, not startswith: a body that opens with a '---' horizontal rule
     # is not the caller supplying frontmatter, and reading it as one dropped
     # the block this guard exists to preserve.
@@ -687,6 +701,9 @@ def edit_wiki_page(
         }
 
     content = _decode_if_escaped(content)
+    # Before the already-on-the-page check below, so a re-run of the same
+    # material compares like with like and still reports 'unchanged'.
+    content, _ = lowercase_targets(content)
     if not content.strip():
         return {"error": "content is empty — nothing to add to the page."}
 
