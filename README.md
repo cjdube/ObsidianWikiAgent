@@ -159,6 +159,14 @@ way to edit what isn't there. Neither set can do the other's job, so the model
 cannot pick wrong, and the whole-file rewrite that used to lose lines and bake
 in escaping cannot happen on an update at all.
 
+The dispatch then binds each step to its one planned page, because the split
+picks the tool and both tools take the page name as an argument — so a step
+created for a page that didn't exist could otherwise name one that did and
+replace it. A call naming any other page is refused, and told which page this
+step is for. That also keeps the batch honest: every sibling page links to this
+one by its *planned* name, so a step that wrote itself somewhere else would
+leave those links pointing at nothing.
+
 It also has a small CLI for inspecting what the agent would see, which is the
 quickest way to check the ingest queue's order or spot a page the model filed
 under a name you didn't expect:

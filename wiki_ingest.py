@@ -60,6 +60,7 @@ from agent.wiki_tools import (
     read_index,
     read_raw_file,
     read_wiki_page,
+    same_page,
     scan_raw,
     update_index,
     write_wiki_page,
@@ -358,7 +359,7 @@ def _plan_dispatch(vault_path: str, plan: _Plan) -> dict:
 
 
 def _execute_dispatch(
-    vault_path: str, source: str, writes: _WriteCounter, exists: bool
+    vault_path: str, source: str, page: str, writes: _WriteCounter, exists: bool
 ) -> dict:
     """Stage 2's tools, for one planned page.
 
@@ -373,6 +374,24 @@ def _execute_dispatch(
     citation that goes on the page's '**Sources**' line, this function is the
     only thing that reliably knows it, and RULES.md has a paragraph of rules
     about writing it correctly that no longer has to be obeyed by anyone.
+
+    `page` is not bound, because both tools advertise a name and the model has
+    to keep sending one — but it is *checked*, and a call naming any other page
+    is refused. That closes the gap the schema split alone left open: the split
+    decides which tool a step is handed, and until this it did not decide which
+    file the tool could be pointed at. A step created for a page that did not
+    exist held write_wiki_page, which replaces whole files and takes the name
+    as an argument — so naming a page that did exist would have overwritten it,
+    through the one path in the ingest that the create/update split was
+    supposed to have closed.
+
+    Wrong-page writes are not only a durability problem. _execute_unit puts the
+    whole batch's planned names in the prompt as the only wiki-links this step
+    may use, so every sibling links to this page by its *planned* name; a step
+    that wrote itself somewhere else would leave those links pointing at
+    nothing, and stage 3 would log the name that was planned rather than the
+    file on disk. One page per conversation is what the rest of the stage
+    already assumes. This makes it true.
     """
     def _counted(fn):
         def call(**kwargs):
@@ -385,6 +404,32 @@ def _execute_dispatch(
             return result
         return call
 
+    def _this_page_only(fn, tool: str):
+        """Refuse the call unless it names this step's page, then write that
+        name rather than the one that arrived — identical names can still be
+        spelled differently, and the spelling siblings link to is this one.
+
+        Refused rather than silently redirected. A silent redirect would put
+        the model's text on a page it did not mean, and this repo's own habit
+        with a bad tool call is to say what is wrong and name the fix (see
+        write_wiki_page's RESERVED refusal), because a model mid-workflow that
+        is only told 'no' retries the same call.
+
+        An omitted name is not a mismatch. There is exactly one page this step
+        can be talking about, so filling it in beats spending an iteration.
+        """
+        def call(name=None, **kwargs):
+            if name is not None and not same_page(vault_path, name, page):
+                return {
+                    "error": f"'{name}' is not this step's page — this step "
+                             f"writes '{page}' and nothing else. Call {tool} "
+                             f"again with name='{page}'. The other pages from "
+                             f"this source are being written by their own "
+                             f"separate steps."
+                }
+            return fn(name=page, **kwargs)
+        return call
+
     tools = {
         "read_raw_file": functools.partial(read_raw_file, vault_path),
         "read_wiki_page": functools.partial(read_wiki_page, vault_path),
@@ -392,12 +437,14 @@ def _execute_dispatch(
         "read_index": functools.partial(read_index, vault_path),
     }
     if exists:
-        tools["edit_wiki_page"] = _counted(
-            functools.partial(edit_wiki_page, vault_path, source)
+        tools["edit_wiki_page"] = _this_page_only(
+            _counted(functools.partial(edit_wiki_page, vault_path, source)),
+            "edit_wiki_page",
         )
     else:
-        tools["write_wiki_page"] = _counted(
-            functools.partial(write_wiki_page, vault_path)
+        tools["write_wiki_page"] = _this_page_only(
+            _counted(functools.partial(write_wiki_page, vault_path)),
+            "write_wiki_page",
         )
     return tools
 
@@ -609,7 +656,9 @@ def _execute_unit(
                 + (", ".join(f"[[{n}]]" for n in siblings) if siblings else "none")
             ),
             tools=schemas,
-            dispatch=_execute_dispatch(vault_path, filename, writes, exists),
+            dispatch=_execute_dispatch(
+                vault_path, filename, unit["name"], writes, exists
+            ),
             logger=logger,
             max_iterations=MAX_EXECUTE_ITERATIONS,
             think=False,

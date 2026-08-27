@@ -103,9 +103,9 @@ def test_every_stage_dispatches_every_tool_it_advertises(vault):
     for schemas, dispatch in (
         (wt.PLAN_TOOL_SCHEMAS, wiki_ingest._plan_dispatch(vault.path, wiki_ingest._Plan())),
         (wt.CREATE_PAGE_TOOL_SCHEMAS,
-         wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=False)),
+         wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=False)),
         (wt.UPDATE_PAGE_TOOL_SCHEMAS,
-         wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=True)),
+         wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=True)),
         (wt.LOG_TOOL_SCHEMAS, wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter())),
     ):
         advertised = {t["function"]["name"] for t in schemas}
@@ -145,10 +145,14 @@ def test_planning_stage_has_no_tool_that_writes(vault):
 
 
 def test_write_counter_ignores_a_refused_write(vault):
-    """A refused reserved name comes back as an error result. Counting it as
-    progress would mark a page done on a call that wrote nothing."""
+    """A refused write comes back as an error result. Counting it as progress
+    would mark a page done on a call that wrote nothing. 'index' is refused
+    here by the this-page-only guard before RESERVED ever sees it — both are
+    error results, and the counter must ignore either."""
     writes = wiki_ingest._WriteCounter()
-    dispatch = wiki_ingest._execute_dispatch(vault.path, "src.md", writes, exists=False)
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "real", writes, exists=False
+    )
 
     assert "error" in dispatch["write_wiki_page"](name="index", content="x")
     assert not writes
@@ -158,11 +162,13 @@ def test_write_counter_ignores_a_refused_write(vault):
 
 
 def test_edit_counter_ignores_a_refused_edit(vault):
-    """The update path needs the same guarantee as the create path — a page that
-    isn't there is an error result, not progress."""
+    """The update path needs the same guarantee as the create path — a refused
+    call is an error result, not progress."""
     vault.page("real", "# Real\n\n**Sources**: a.md\n**Last updated**: 2026-01-01\n")
     writes = wiki_ingest._WriteCounter()
-    dispatch = wiki_ingest._execute_dispatch(vault.path, "src.md", writes, exists=True)
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "real", writes, exists=True
+    )
 
     assert "error" in dispatch["edit_wiki_page"](
         name="ghost", section="S", content="x"
@@ -181,7 +187,8 @@ def test_the_source_filename_is_not_the_models_to_supply(vault):
     raw/<folder>/. Binding it here means none of that can be got wrong."""
     vault.page("real", "# Real\n\n**Sources**: a.md\n**Last updated**: 2026-01-01\n")
     dispatch = wiki_ingest._execute_dispatch(
-        vault.path, "daily-ai/Chat-2026-08-20.md", wiki_ingest._WriteCounter(), True
+        vault.path, "daily-ai/Chat-2026-08-20.md", "real",
+        wiki_ingest._WriteCounter(), True
     )
     dispatch["edit_wiki_page"](name="real", section="Notes", content="- fact\n")
 
@@ -540,8 +547,8 @@ def test_read_index_is_dispatchable_in_every_stage(vault):
     counter = wiki_ingest._WriteCounter()
     stages = (
         wiki_ingest._plan_dispatch(vault.path, wiki_ingest._Plan()),
-        wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=False),
-        wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=True),
+        wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=False),
+        wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=True),
         wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter()),
     )
     for dispatch in stages:
@@ -557,3 +564,98 @@ def test_stage_three_read_index_does_not_count_as_a_write(vault):
     wiki_ingest._log_dispatch(vault.path, counter)["read_index"]()
 
     assert counter.count == 0
+
+
+# --- one step writes one page ----------------------------------------------
+
+
+def test_a_create_step_cannot_overwrite_a_page_it_was_not_given(vault):
+    """The hole the create/update split alone left open. The split decides
+    which tool a step is handed, not which file that tool is pointed at, and
+    write_wiki_page replaces whole files and takes the name as an argument. So
+    a step created for a page that did not exist could name one that did and
+    destroy it — through the exact path the split exists to close."""
+    vault.page("colima", "# Colima\n\nThe real page.\n")
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "podman", writes, exists=False
+    )
+
+    result = dispatch["write_wiki_page"](name="colima", content="# Clobbered\n")
+
+    assert "error" in result
+    assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n\nThe real page.\n"
+    assert not writes
+
+
+def test_an_update_step_cannot_edit_a_page_it_was_not_given(vault):
+    """Less destructive than an overwrite and wrong for the same reason: the
+    text lands on a page nobody asked to change, cited to this source."""
+    vault.page("colima", "# Colima\n\n## Notes\n\n- real\n")
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "podman", writes, exists=True
+    )
+
+    result = dispatch["edit_wiki_page"](
+        name="colima", section="Notes", content="- smuggled in\n"
+    )
+
+    assert "error" in result
+    assert "smuggled in" not in (vault.root / "wiki" / "colima.md").read_text()
+    assert not writes
+
+
+def test_the_refusal_names_the_page_the_step_should_write(vault):
+    """A model mid-workflow that is only told 'no' retries the same call — the
+    2026-08-20 truncation loop is what that costs. So the error names the page
+    and the call to make, the same way the RESERVED refusal names the tool."""
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "podman", wiki_ingest._WriteCounter(), exists=False
+    )
+
+    error = dispatch["write_wiki_page"](name="colima", content="x")["error"]
+
+    assert "podman" in error
+    assert "write_wiki_page" in error
+
+
+def test_the_same_page_spelled_differently_is_still_this_step_s_page(vault):
+    """'Colima', 'colima' and 'colima.md' are one file, and _safe_page_path is
+    the only thing that knows it. A guard comparing raw strings would refuse
+    the step its own page whenever the model added the extension."""
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "colima", writes, exists=False
+    )
+
+    assert "written" in dispatch["write_wiki_page"](
+        name="Colima.md", content="# Colima\n"
+    )
+    assert writes
+
+
+def test_an_omitted_page_name_is_filled_in_rather_than_refused(vault):
+    """There is exactly one page this step can mean, so filling it in beats
+    spending one of twelve iterations saying so."""
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "colima", wiki_ingest._WriteCounter(), exists=False
+    )
+
+    assert "written" in dispatch["write_wiki_page"](content="# Colima\n")
+    assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n"
+
+
+def test_the_page_written_is_the_one_siblings_link_to(vault):
+    """Why the guard refuses rather than redirecting quietly to the model's
+    name. _execute_unit puts the batch's planned names in the prompt as the
+    only links this step may use, so every sibling links to this page by its
+    planned name — a step that wrote itself elsewhere would leave those links
+    pointing at nothing, and stage 3 would log the planned name anyway."""
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "colima", wiki_ingest._WriteCounter(), exists=False
+    )
+
+    dispatch["write_wiki_page"](name="COLIMA", content="# Colima\n")
+
+    assert (vault.root / "wiki" / "colima.md").is_file()

@@ -67,10 +67,17 @@ one holds `write_wiki_page` and no way to edit. An update therefore cannot
 throw the existing page away — the worst it can do is add wrong text, which the
 diff still shows.
 
-Note what that does not reach. `write_wiki_page` takes the page name as an
-argument, so a unit that was given it — because *its* page did not exist — can
-still name a different page that does, and overwrite it. The split constrains
-which tool each unit gets, not which file the tool is pointed at.
+The split alone constrained which tool each unit got, not which file that tool
+could be pointed at — and both tools take the page name as an argument. So a
+unit handed `write_wiki_page`, because *its* page did not exist, could name a
+page that did and replace it. Stage 2 now also binds each unit to its one
+planned page (`_execute_dispatch` in `wiki_ingest.py`): a call naming any other
+page is refused rather than quietly redirected, and the refusal names the page
+that unit is there to write.
+
+So the remaining blast radius of an argued-into-it model is the pages its own
+plan named — wrong text on a page that was going to be touched anyway, which
+the diff still shows.
 
 `write_wiki_page` additionally refuses the two filenames Python owns,
 `index.md` and `log.md` (`RESERVED` in `agent/wiki_tools.py`). Both sit inside

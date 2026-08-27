@@ -407,6 +407,29 @@ def page_exists(vault_path: str, name: str) -> bool:
         return False
 
 
+def same_page(vault_path: str, a: str, b: str) -> bool:
+    """Whether two page names mean the same file in wiki/.
+
+    Not a model tool. Stage 2 gives each conversation exactly one page to
+    write, and has to compare the name a tool call carries against it — but
+    'Colima', 'colima' and 'colima.md' are one page, and only _safe_page_path
+    knows that. Asking here rather than lower-casing at the call site keeps
+    that rule in the one function that already owns it, which is the same
+    reason page_exists lives here.
+
+    A name that resolves outside wiki/ is answered False rather than raising,
+    again like page_exists: to this question it is simply not the same page,
+    and the tool being guarded refuses it again on its own terms.
+    """
+    try:
+        return (
+            _safe_page_path(vault_path, a).name
+            == _safe_page_path(vault_path, b).name
+        )
+    except ValueError:
+        return False
+
+
 _FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---", re.DOTALL)
 
 _ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
