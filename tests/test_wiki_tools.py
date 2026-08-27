@@ -1211,3 +1211,72 @@ def test_write_wiki_page_refuses_a_reserved_name_in_any_case(vault):
     vault.index(original)
     assert "error" in wt.write_wiki_page(vault.path, "Index.md", "# Clobbered\n")
     assert (vault.root / "wiki" / "index.md").read_text() == original
+
+
+def test_atomic_write_leaves_the_original_when_the_rename_never_happens(vault, monkeypatch):
+    """The whole point: a write interrupted before os.replace must not have
+    touched the target. The watchdog in agent/budget.py raises from a signal
+    handler at an arbitrary instruction, so this is the shape of every write
+    that a run overrunning its budget can land inside."""
+    page = vault.page("colima", "# Colima\n\nThe real page.\n")
+
+    def sigalrm_lands_here(*_args):
+        raise KeyboardInterrupt("watchdog fired between the write and the rename")
+
+    monkeypatch.setattr(wt.os, "replace", sigalrm_lands_here)
+    with pytest.raises(KeyboardInterrupt):
+        wt.atomic_write(page, "# Clobbered\n")
+
+    assert page.read_text() == "# Colima\n\nThe real page.\n"
+
+
+def test_atomic_write_leftovers_are_invisible_to_the_vault(vault, monkeypatch):
+    """A crash before the rename strands the temp file. It is dot-prefixed, so
+    nothing lists, indexes or lints it — which is what makes leaving it there
+    the safe failure rather than a page nobody asked for."""
+    vault.page("colima", "# Colima\n")
+
+    def fails(*_args):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(wt.os, "replace", fails)
+    with pytest.raises(OSError):
+        wt.atomic_write(vault.root / "wiki" / "colima.md", "# Clobbered\n")
+
+    stranded = list((vault.root / "wiki").glob(".*.tmp"))
+    assert stranded, "expected the temp file to be left behind"
+    assert wt.list_wiki_pages(vault.path)["pages"] == ["colima.md"]
+
+
+def test_ledger_temp_name_does_not_double_its_leading_dot(vault, monkeypatch):
+    """.ingested.json already starts with a dot; the temp name must not become
+    '..ingested.json.tmp'."""
+    seen = []
+    monkeypatch.setattr(wt.os, "replace", lambda tmp, dest: seen.append(Path(tmp).name))
+    wt.atomic_write(vault.root / "wiki" / ".ingested.json", "[]")
+    assert seen == [".ingested.json.tmp"]
+
+
+@pytest.mark.parametrize("write", [
+    lambda v: wt.write_wiki_page(v.path, "colima", "# Colima\n\nNew body.\n"),
+    lambda v: wt.edit_wiki_page(v.path, "src.md", "colima", "Notes", "- a note"),
+    lambda v: wt.update_index(v.path, "colima", "Tools"),
+])
+def test_every_vault_write_goes_through_atomic_write(vault, monkeypatch, write):
+    """Named individually rather than grepped: a new write added later that
+    calls write_text directly is exactly the regression this guards."""
+    vault.page("colima", "# Colima\n\n**Summary**: A runtime.\n**Sources**: src.md\n**Last updated**: 2026-08-01\n\n## Notes\n\nOld.\n")
+    vault.index("# Index\n\n## Tools\n\n")
+    vault.raw("src.md")
+
+    calls = []
+    real = wt.atomic_write
+
+    def recorded(path, content):
+        calls.append(Path(path).name)
+        return real(path, content)
+
+    monkeypatch.setattr(wt, "atomic_write", recorded)
+
+    write(vault)
+    assert calls, "this write bypassed atomic_write"

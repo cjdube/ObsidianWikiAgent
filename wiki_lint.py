@@ -53,6 +53,7 @@ from agent.notify import notify_failure
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
     RawScan,
+    atomic_write,
     get_ingested_sources,
     list_wiki_pages,
     query_dispatch,
@@ -630,7 +631,7 @@ def apply_safe_fixes(vault_path: str, pages: dict[str, str]) -> list[str]:
 
         # One write per page however many fixes applied, reported separately.
         if content != original:
-            (wiki_dir / f"{slug}.md").write_text(content, encoding="utf-8")
+            atomic_write(wiki_dir / f"{slug}.md", content)
             pages[slug] = content
             changes.extend(f"{slug}.md: {note}" for note in notes)
 
@@ -638,7 +639,7 @@ def apply_safe_fixes(vault_path: str, pages: dict[str, str]) -> list[str]:
     if index_path.is_file():
         cleaned, n = delink_broken(index_path.read_text(encoding="utf-8"), set(pages))
         if n:
-            index_path.write_text(cleaned, encoding="utf-8")
+            atomic_write(index_path, cleaned)
             changes.append(f"index.md: de-linked {n} dead link{'s' if n > 1 else ''}")
 
     return changes

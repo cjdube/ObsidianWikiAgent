@@ -56,6 +56,41 @@ def _wiki_dir(vault_path: str) -> Path:
     return Path(vault_path) / "wiki"
 
 
+def atomic_write(path: Path, content: str) -> None:
+    """Write `content` to `path` without ever leaving a half-written file.
+
+    Path.write_text opens with "w", which truncates before it writes. A crash
+    in that gap leaves an empty or partial file where a real one was, and the
+    files this module writes are the two that would hurt most: wiki/index.md,
+    and a page a human trusts.
+
+    The gap is not hypothetical. The watchdog in agent/budget.py raises from a
+    SIGALRM handler at whatever point the process happens to be, so every run
+    that overruns its budget can land inside one of these writes. mark_ingested
+    has been written this way all along for exactly that reason; the page
+    writes had not caught up, which meant the ledger was safe from an overrun
+    and the pages it points at were not.
+
+    Written to a sibling and renamed over the target, because os.replace is
+    atomic: the file is either its old content or its new content, never a half
+    of either. Interrupted before the rename, the target is untouched and a
+    stray temp file is left behind — which is the right way round.
+
+    The temp name is dot-prefixed so a leftover can never be mistaken for
+    content: list_wiki_pages skips dotfiles, so it is never listed, never
+    indexed, and never linted. lstrip('.') keeps the ledger's own leading dot
+    from doubling into '..ingested.json.tmp'.
+
+    No fsync. What this defends against is an exception or a signal mid-write,
+    not power loss, and os.replace already orders the two states for every
+    reader on this machine — so paying an fsync on every page write would buy a
+    guarantee against a different failure than the one that happens here.
+    """
+    tmp = path.with_name(f".{path.name.lstrip('.')}.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _safe_page_path(vault_path: str, name: str) -> Path:
     """Resolve a wiki page name to a path directly inside <vault>/wiki.
 
@@ -527,7 +562,7 @@ def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
         block = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
         if block:
             content = f"{block.group(0)}\n\n{content.lstrip()}"
-    path.write_text(content, encoding="utf-8")
+    atomic_write(path, content)
     return {"written": path.name}
 
 
@@ -744,7 +779,7 @@ def edit_wiki_page(
         elif summary.strip() and line.startswith("**Summary**:"):
             lines[i] = f"**Summary**: {_decode_if_escaped(summary).strip()}"
 
-    path.write_text(head + "\n".join(lines), encoding="utf-8")
+    atomic_write(path, head + "\n".join(lines))
     return {"edited": path.name, "section": section.strip()}
 
 
@@ -994,7 +1029,7 @@ def update_index(vault_path: str, page: str, section: str) -> dict:
     body, unfiled, delinked = _normalize_index(
         vault_path, "\n".join(lines), pages=pages
     )
-    (wiki_dir / "index.md").write_text(body + "\n", encoding="utf-8")
+    atomic_write(wiki_dir / "index.md", body + "\n")
     return {"filed": name, "section": section, "unfiled": unfiled, "delinked": delinked}
 
 
@@ -1041,13 +1076,10 @@ def get_ingested_sources(vault_path: str) -> list[str]:
 def mark_ingested(vault_path: str, filename: str) -> None:
     """Record a source as processed, atomically.
 
-    Written to a sibling and renamed over the ledger rather than written in
-    place, because write_text truncates before it writes: a crash in that gap
-    leaves a file that parses as nothing. The gap is not hypothetical — the
-    watchdog in agent/budget.py raises from a signal handler at whatever point
-    the process happens to be, so every run that overruns its budget can land
-    in it. os.replace is atomic, so the ledger is either the old list or the
-    new one and never a half of either.
+    Through atomic_write, which this function used to implement inline. The
+    stake here is the sharpest in the vault: a ledger caught half-written
+    parses as nothing, and get_ingested_sources reads that as "no source has
+    ever been ingested" — so the next run re-ingests every file in raw/.
     """
     wiki_dir = _wiki_dir(vault_path)
     wiki_dir.mkdir(parents=True, exist_ok=True)
@@ -1055,9 +1087,7 @@ def mark_ingested(vault_path: str, filename: str) -> None:
     sources = get_ingested_sources(vault_path)
     if filename not in sources:
         sources.append(filename)
-    tmp = path.parent / f"{path.name}.tmp"
-    tmp.write_text(json.dumps(sources, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write(path, json.dumps(sources, indent=2))
 
 
 READ_RAW_FILE_SCHEMA = {
