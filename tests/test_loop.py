@@ -687,3 +687,175 @@ def test_an_empty_reply_that_stopped_normally_is_still_the_answer(monkeypatch):
 
     assert answer == ""
     assert len(calls) == 1
+
+
+# --- _retry_delay ----------------------------------------------------------
+
+
+def test_retry_after_as_an_http_date_does_not_crash_the_run():
+    """RFC 9110 lets Retry-After be a date rather than a count of seconds, and
+    float() on one raises. That ValueError was raised inside the retry loop,
+    where nothing catches it, so a header whose whole purpose is to slow the
+    client down instead killed the source with an error naming neither the
+    header nor the server."""
+    delay = loop._retry_delay("Wed, 21 Oct 2015 07:28:00 GMT", attempt=0)
+    assert 1.0 <= delay <= 2.0, "should fall back to the computed backoff"
+
+
+def test_retry_after_is_capped_rather_than_obeyed():
+    """The computed backoff has always been capped at _MAX_BACKOFF_S; a
+    server-supplied one was not. budget.before_retry does not save this —
+    wiki_query.py starts no budget and wiki_lint starts one only for --deep —
+    so an interactive question would have sat silently for the full hour."""
+    delay = loop._retry_delay("3600", attempt=0)
+    assert delay <= loop._MAX_BACKOFF_S + 1
+
+
+def test_retry_after_is_honoured_when_it_is_shorter_than_the_cap():
+    """Capping must not become ignoring: a server asking for 5 seconds gets 5,
+    not the cap and not the exponential backoff."""
+    delay = loop._retry_delay("5", attempt=4)
+    assert 5.0 <= delay <= 6.0
+
+
+def test_a_negative_retry_after_never_becomes_a_negative_sleep():
+    """time.sleep raises on a negative number, so a malformed header must not
+    reach it."""
+    assert loop._retry_delay("-100", attempt=0) >= 0.0
+
+
+def test_computed_backoff_is_capped_too():
+    """The ceiling belongs to the delay, not to who chose it."""
+    assert loop._retry_delay(None, attempt=20) <= loop._MAX_BACKOFF_S + 1
+
+
+def test_a_429_with_a_date_retry_after_still_retries(monkeypatch):
+    """The end-to-end shape of the bug: the crash happened inside
+    _post_with_retry, so the fix has to be visible from there."""
+    slept = []
+    monkeypatch.setattr(loop.time, "sleep", slept.append)
+    monkeypatch.setattr(
+        loop._session, "post",
+        _sequenced([
+            FakeResp(429, headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}),
+            FakeResp(200, json_data={"ok": 1}),
+        ]),
+    )
+
+    resp = loop._post_with_retry("http://x", {})
+
+    assert resp.json() == {"ok": 1}
+    assert len(slept) == 1 and slept[0] <= loop._MAX_BACKOFF_S + 1
+
+
+# --- Gemini truncation -----------------------------------------------------
+
+
+def test_a_truncated_gemini_reply_does_not_run_its_tool_call(monkeypatch):
+    """The same cut the Ollama path has guarded since 2026-08-20, under the
+    other provider's name for it. Gemini reports finishReason=MAX_TOKENS and
+    still hands back the part of the call it had written, so a half-written
+    page arrives looking complete. wiki_lint --deep is read-only today, but
+    LLM_PROVIDER=gemini is a documented opt-in for a full vault rebuild and
+    that path writes."""
+    ran = []
+    payloads = [
+        {"candidates": [{
+            "finishReason": "MAX_TOKENS",
+            "content": {"parts": [{"functionCall": {
+                "name": "write_wiki_page",
+                "args": {"name": "colima.md", "content": "# Colima\n\ncut off mid-"},
+            }}]},
+        }]},
+        {"candidates": [{"content": {"parts": [{"text": "done"}]}}]},
+    ]
+    sent = []
+
+    def fake_post(url, payload, **kwargs):
+        sent.append(payload)
+        return FakeResp(200, json_data=payloads.pop(0))
+
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    answer = loop.run_agent(
+        "sys", "user", tools=[],
+        dispatch={"write_wiki_page": lambda **kw: ran.append(kw) or {"written": "x"}},
+        provider="gemini",
+    )
+
+    assert ran == [], "the truncated call must not reach the tool"
+    assert answer == "done"
+    # The payload holds the live contents list, so scan it rather than take
+    # the tail: by now the second reply has been appended too.
+    fed_back = [
+        p["functionResponse"]
+        for turn in sent[1]["contents"]
+        for p in turn["parts"]
+        if "functionResponse" in p
+    ]
+    assert len(fed_back) == 1
+    assert fed_back[0]["name"] == "write_wiki_page"
+    assert "cut off" in fed_back[0]["response"]["error"]
+
+
+def test_a_complete_gemini_reply_still_runs_its_tool_call(monkeypatch):
+    """The guard keys off finishReason, so the ordinary path — including the
+    STOP Gemini sends on a well-formed call — has to keep working."""
+    ran = []
+    payloads = [
+        {"candidates": [{
+            "finishReason": "STOP",
+            "content": {"parts": [{"functionCall": {
+                "name": "write_wiki_page",
+                "args": {"name": "colima.md", "content": "# Colima\n"},
+            }}]},
+        }]},
+        {"candidates": [{"content": {"parts": [{"text": "done"}]}}]},
+    ]
+
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setattr(
+        loop, "_post_with_retry",
+        lambda *a, **k: FakeResp(200, json_data=payloads.pop(0)),
+    )
+
+    loop.run_agent(
+        "sys", "user", tools=[],
+        dispatch={"write_wiki_page": lambda **kw: ran.append(kw) or {"written": "x"}},
+        provider="gemini",
+    )
+
+    assert ran == [{"name": "colima.md", "content": "# Colima\n"}]
+
+
+def test_a_gemini_reply_cut_off_before_any_tool_call_is_not_a_final_answer(monkeypatch):
+    """The other half, in Gemini's message shape: the cut lands before anything
+    parseable, so returning the empty text as the answer would read downstream
+    as a model that chose to do nothing."""
+    payloads = [
+        {"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]},
+        {"candidates": [{"content": {"parts": [{"text": "done"}]}}]},
+    ]
+    sent = []
+
+    def fake_post(url, payload, **kwargs):
+        sent.append(payload)
+        return FakeResp(200, json_data=payloads.pop(0))
+
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    answer = loop.run_agent(
+        "sys", "user", tools=[], dispatch={}, provider="gemini",
+    )
+
+    assert answer == "done", "the truncated turn must not end the loop"
+    # The payload holds the live contents list, so read the user turns rather
+    # than the tail: by now the second reply has been appended too.
+    said = [t for t in sent[1]["contents"] if t["role"] == "user"]
+    assert len(said) == 2, "the nudge should be the only turn added"
+    assert "cut off" in said[1]["parts"][0]["text"], "Gemini wants parts, not content"

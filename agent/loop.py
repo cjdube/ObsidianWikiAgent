@@ -169,13 +169,20 @@ def _dispatch_tool(
     return result
 
 
-def _truncated_call(fn_name: str, logger: Optional[logging.Logger]) -> dict:
+def _truncated_call(
+    fn_name: str, logger: Optional[logging.Logger], cap: str
+) -> dict:
     """The result to feed back for a tool call that arrived cut off.
 
-    A reply that stops at num_predict stops wherever it happened to be, and if
-    that is inside a tool call Ollama still returns whatever arguments it
-    managed to parse. The call then arrives looking complete while missing
-    every character the model had not written yet.
+    A reply that stops at its output limit stops wherever it happened to be,
+    and if that is inside a tool call the provider still returns whatever
+    arguments it managed to parse. The call then arrives looking complete while
+    missing every character the model had not written yet.
+
+    `cap` names the limit that was hit, and reaches the log line only. Ollama
+    can say which num_predict it was; Gemini reports MAX_TOKENS without saying
+    what the number was, so it can only name the limit. What goes back to the
+    model is the same either way, because the remedy is.
 
     Running it is the danger. write_wiki_page replaces whole files, so a
     truncated 'content' is a half page written over a real one — and nothing
@@ -191,9 +198,8 @@ def _truncated_call(fn_name: str, logger: Optional[logging.Logger]) -> dict:
     """
     if logger:
         logger.warning(
-            f"Refused a truncated '{fn_name}' call — the reply hit "
-            f"num_predict={_ollama_options()['num_predict']} mid-call, so its "
-            f"arguments are incomplete. Not running it."
+            f"Refused a truncated '{fn_name}' call — the reply hit {cap} "
+            f"mid-call, so its arguments are incomplete. Not running it."
         )
     return {
         "error": (
@@ -207,14 +213,19 @@ def _truncated_call(fn_name: str, logger: Optional[logging.Logger]) -> dict:
     }
 
 
-def _truncated_reply_nudge(logger: Optional[logging.Logger]) -> dict:
-    """The message to send back when a reply was cut off before any tool call.
+def _truncated_reply_nudge(logger: Optional[logging.Logger], cap: str) -> str:
+    """The text to send back when a reply was cut off before any tool call.
 
     The other half of the truncation case. _truncated_call covers the cut that
     lands *inside* a call; this one lands before the model wrote anything
-    parseable, so Ollama returns done_reason='length' with no tool calls and no
-    content at all. Verified live on 2026-08-20 against gemma4:26b-mlx at
+    parseable, so the provider reports the length stop with no tool calls and
+    no content at all. Verified live on 2026-08-20 against gemma4:26b-mlx at
     num_predict 600 and 1200.
+
+    Returns bare text rather than a whole message, because the two providers
+    disagree about the envelope — Ollama wants {"role", "content"}, Gemini
+    wants {"role", "parts": [{"text"}]} — while the words are the same for
+    both. Each caller wraps it in its own shape.
 
     The loop used to return that empty content as the final answer, which reads
     downstream as a model that chose to do nothing: wiki_ingest logged
@@ -224,20 +235,55 @@ def _truncated_reply_nudge(logger: Optional[logging.Logger]) -> dict:
     """
     if logger:
         logger.warning(
-            f"Reply was cut off at num_predict="
-            f"{_ollama_options()['num_predict']} before any tool call — "
-            f"nudging the model to answer shorter rather than treating the "
-            f"empty reply as a final answer."
+            f"Reply was cut off at {cap} before any tool call — nudging the "
+            f"model to answer shorter rather than treating the empty reply as "
+            f"a final answer."
         )
-    return {
-        "role": "user",
-        "content": (
-            "Your last reply was cut off at the reply-length limit before you "
-            "finished it, so none of it reached me. Answer again, shorter: "
-            "make one tool call at a time, and keep any page you write "
-            "concise or split it into two pages linked to each other."
-        ),
-    }
+    return (
+        "Your last reply was cut off at the reply-length limit before you "
+        "finished it, so none of it reached me. Answer again, shorter: "
+        "make one tool call at a time, and keep any page you write "
+        "concise or split it into two pages linked to each other."
+    )
+
+
+# Ceiling on one backoff, whoever picked it. The computed backoff has always
+# been capped; a server-supplied Retry-After was not, and the run budget only
+# catches an over-long one while a budget is running — wiki_query.py starts
+# none, and wiki_lint starts one only for --deep. So an interactive question
+# could sit silently for the full hour a `Retry-After: 3600` asks for.
+#
+# Capping it is safe because nothing here is obliged to obey the server's
+# number: _MAX_HTTP_ATTEMPTS bounds the attempts and the caller retries the
+# whole source anyway. Waiting an hour to be polite to a quota that resets on
+# its own schedule buys nothing a shorter wait does not.
+_MAX_BACKOFF_S = 60
+
+
+def _retry_delay(retry_after: Optional[str], attempt: int) -> float:
+    """How long to wait before the next attempt, capped from both ends.
+
+    Retry-After is allowed to be an HTTP date rather than a count of seconds
+    (RFC 9110), and float() on 'Wed, 21 Oct 2015 07:28:00 GMT' raises. That
+    happened inside the retry loop, where nothing catches it, so a header whose
+    entire purpose is to slow the client down would instead kill the source
+    with a ValueError that named neither the header nor the server.
+
+    The date form is not parsed, only refused: every value is clamped to
+    _MAX_BACKOFF_S anyway, so any date far enough out to matter would be
+    clamped to the same number the fallback already gives. Negative and absurd
+    values fall out the same way.
+
+    Jitter is added last so two clients told the same number do not return in
+    lockstep.
+    """
+    delay = min(2 ** attempt, _MAX_BACKOFF_S)
+    if retry_after:
+        try:
+            delay = max(0.0, min(float(retry_after), _MAX_BACKOFF_S))
+        except ValueError:
+            pass
+    return delay + random.uniform(0, 1)
 
 
 def _post_with_retry(
@@ -249,8 +295,9 @@ def _post_with_retry(
 ) -> requests.Response:
     """POST, retrying transient failures with exponential backoff + jitter.
 
-    Honors Retry-After when the server sends it (Gemini does on quota errors).
-    Network-level failures (timeouts, connection errors — routine for a large
+    Honors Retry-After when the server sends it (Gemini does on quota errors),
+    up to _MAX_BACKOFF_S — see _retry_delay for why the server's number is
+    capped rather than obeyed. Network-level failures (timeouts, connection errors — routine for a large
     local model under load) get the same backoff as retryable HTTP statuses,
     rather than failing the call on the first slow response.
 
@@ -270,7 +317,7 @@ def _post_with_retry(
         except requests.exceptions.RequestException as e:
             if attempt == _MAX_HTTP_ATTEMPTS:
                 raise
-            delay = min(2 ** attempt, 60) + random.uniform(0, 1)
+            delay = _retry_delay(None, attempt)
             reason = f"{e.__class__.__name__} from model API"
             budget.before_retry(delay, reason)
             if logger:
@@ -285,9 +332,7 @@ def _post_with_retry(
             return resp
         if attempt == _MAX_HTTP_ATTEMPTS:
             resp.raise_for_status()
-        retry_after = resp.headers.get("Retry-After")
-        delay = float(retry_after) if retry_after else min(2 ** attempt, 60)
-        delay += random.uniform(0, 1)
+        delay = _retry_delay(resp.headers.get("Retry-After"), attempt)
         reason = f"HTTP {resp.status_code} from model API"
         budget.before_retry(delay, reason)
         if logger:
@@ -524,6 +569,7 @@ def _run_ollama(
     host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
     timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
     options = _ollama_options()
+    cap = f"num_predict={options['num_predict']}"
     _warn_if_context_is_tight(system_prompt, user_prompt, options["num_ctx"], logger)
 
     messages = [
@@ -558,7 +604,10 @@ def _run_ollama(
         tool_calls = message.get("tool_calls") or []
         if not tool_calls:
             if data.get("done_reason") == "length":
-                messages.append(_truncated_reply_nudge(logger))
+                messages.append({
+                    "role": "user",
+                    "content": _truncated_reply_nudge(logger, cap),
+                })
                 continue
             return message.get("content", "")
 
@@ -571,7 +620,7 @@ def _run_ollama(
             fn_name = call["function"]["name"]
             fn_args = call["function"].get("arguments", {})
             if truncated:
-                result = _truncated_call(fn_name, logger)
+                result = _truncated_call(fn_name, logger, cap)
             else:
                 result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
             # tool_name matters once a turn carries several calls: without it
@@ -672,15 +721,38 @@ def _run_gemini(
         parts = content.get("parts") or []
         contents.append({"role": "model", "parts": parts})
 
+        # The same cut the Ollama path has guarded since 2026-08-20, under the
+        # other provider's name for it. Gemini stops at its own output-token
+        # limit and says so in finishReason, but it still returns whatever of
+        # the call it had written — so a truncated write_wiki_page arrives
+        # looking complete and lands half a page over a real one.
+        #
+        # Today the only Gemini caller in this repo is wiki_lint --deep, whose
+        # tools are all read-only, so nothing can be damaged through this path
+        # yet. LLM_PROVIDER=gemini is a documented per-run opt-in for a full
+        # vault rebuild, and that one does write. Guarding it now costs a
+        # branch; finding out later costs pages.
+        truncated = candidates[0].get("finishReason") == "MAX_TOKENS"
+        cap = "the model's output token limit"
+
         calls = [p["functionCall"] for p in parts if "functionCall" in p]
         if not calls:
+            if truncated:
+                contents.append({
+                    "role": "user",
+                    "parts": [{"text": _truncated_reply_nudge(logger, cap)}],
+                })
+                continue
             return "".join(p.get("text", "") for p in parts)
 
         responses = []
         for call in calls:
             fn_name = call["name"]
             fn_args = call.get("args") or {}
-            result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
+            if truncated:
+                result = _truncated_call(fn_name, logger, cap)
+            else:
+                result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
             responses.append(
                 {"functionResponse": {"name": fn_name, "response": result}}
             )
