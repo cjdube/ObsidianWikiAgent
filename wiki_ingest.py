@@ -348,9 +348,11 @@ def _plan_dispatch(vault_path: str, plan: _Plan) -> dict:
         "list_index_sections": functools.partial(list_index_sections, vault_path),
         "submit_plan": _submit_plan,
         # Unadvertised but dispatchable, in every stage — a vault's RULES.md is
-        # part of the system prompt and may name wiki/index.md in prose, and a
-        # call that arrives anyway should work rather than come back as an
-        # unknown-tool error.
+        # part of every stage's system prompt and may name wiki/index.md in
+        # prose, and a call that arrives anyway should work rather than come
+        # back as an unknown-tool error. "Every stage" is held true by
+        # test_read_index_is_dispatchable_in_every_stage; it was not, in stage
+        # 3, for as long as this comment claimed otherwise.
         "read_index": functools.partial(read_index, vault_path),
     }
 
@@ -401,12 +403,22 @@ def _execute_dispatch(
 
 
 def _log_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
-    """Stage 3's one tool."""
+    """Stage 3's one advertised tool, plus the unadvertised read_index.
+
+    read_index because the reason it is dispatchable in the other two stages —
+    a vault's RULES.md is part of every stage's system prompt and may name
+    wiki/index.md in prose — is not weaker here. This stage used to be the one
+    place a call that arrived anyway came back as an unknown-tool error, which
+    cost the shortest conversation in the run an iteration out of four.
+    """
     def _tracked_append_log(**kwargs):
         writes.count += 1
         return append_log(vault_path, **kwargs)
 
-    return {"append_log": _tracked_append_log}
+    return {
+        "append_log": _tracked_append_log,
+        "read_index": functools.partial(read_index, vault_path),
+    }
 
 
 def _load_rules(vault_path: str) -> str:

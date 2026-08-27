@@ -51,11 +51,26 @@ landing outside `<vault>/wiki` and `<vault>/raw`. Both are tested directly
 against `../`, `../../etc/passwd` and absolute paths; because they compare
 against `.resolve()`d paths, a symlink pointing out of the vault is caught by
 the same check. The exposed tools are all vault file I/O — no shell, no
-network, and no path argument that bypasses those two guards. (Seven are
-advertised in `INGEST_TOOL_SCHEMAS`; the ingest dispatch resolves an eighth,
-`read_index`, which is deliberately callable-but-unadvertised so a vault's
-`RULES.md` naming it in prose still works. It is a read, and it is inside the
-same guards.)
+network, and no path argument that bypasses those two guards. (Nine distinct
+tools are advertised across the three ingest stages — `PLAN_TOOL_SCHEMAS`,
+`CREATE_PAGE_TOOL_SCHEMAS`, `UPDATE_PAGE_TOOL_SCHEMAS` and `LOG_TOOL_SCHEMAS`
+in `agent/wiki_tools.py`. No stage sees all nine; each is offered only what its
+one job needs. The dispatch resolves a tenth, `read_index`, which is
+deliberately callable-but-unadvertised so a vault's `RULES.md` naming it in
+prose still works. It is a read, and it is inside the same guards.)
+
+The sharpest of those limits is the split between the two stage-2 sets. Which
+one a unit is offered is decided by whether its page is already on disk, not by
+what the model or its plan asked for: a unit updating an existing page holds
+`edit_wiki_page` and no tool that can replace a file, and a unit creating a new
+one holds `write_wiki_page` and no way to edit. An update therefore cannot
+throw the existing page away — the worst it can do is add wrong text, which the
+diff still shows.
+
+Note what that does not reach. `write_wiki_page` takes the page name as an
+argument, so a unit that was given it — because *its* page did not exist — can
+still name a different page that does, and overwrite it. The split constrains
+which tool each unit gets, not which file the tool is pointed at.
 
 `write_wiki_page` additionally refuses the two filenames Python owns,
 `index.md` and `log.md` (`RESERVED` in `agent/wiki_tools.py`). Both sit inside

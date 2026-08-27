@@ -530,3 +530,30 @@ def test_main_is_quiet_on_a_clean_run(vault, monkeypatch):
 
     assert wiki_ingest.main() == 0
     assert pushed == []
+
+
+def test_read_index_is_dispatchable_in_every_stage(vault):
+    """The comment in _plan_dispatch has always said "in every stage"; stage 3
+    was the exception for as long as it said so. A RULES.md naming wiki/index.md
+    in prose is read by all three stages, so a call arriving in the log stage
+    should work there too — and that stage has the fewest iterations to spare."""
+    counter = wiki_ingest._WriteCounter()
+    stages = (
+        wiki_ingest._plan_dispatch(vault.path, wiki_ingest._Plan()),
+        wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=False),
+        wiki_ingest._execute_dispatch(vault.path, "s.md", counter, exists=True),
+        wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter()),
+    )
+    for dispatch in stages:
+        assert "read_index" in dispatch
+
+
+def test_stage_three_read_index_does_not_count_as_a_write(vault):
+    """A source is marked done on the strength of the write counter, so a read
+    that incremented it would mark a source done having logged nothing."""
+    vault.index("# Index\n\n## Tools\n\n")
+    counter = wiki_ingest._WriteCounter()
+
+    wiki_ingest._log_dispatch(vault.path, counter)["read_index"]()
+
+    assert counter.count == 0

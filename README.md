@@ -117,8 +117,11 @@ differs; each provider owns its own request/history translation and they share
 the tool-dispatch step.
 
 The 6-iteration cap is only the default for callers that don't say otherwise —
-`wiki_ingest.py` sets 8 for its plan and execute stages and 4 for its log stage
-(each is a short conversation with one job),
+`wiki_ingest.py` sets 8 for its plan stage, 12 for execute and 4 for log (each
+is a short conversation with one job; execute carries the extra slack because
+the cut-off nudge in `agent/loop.py` costs an iteration every time it fires,
+and one page in the 2026-08-20 run burned three that way before its write
+landed),
 `wiki_lint.py --deep` to 60, and `wiki_query.py` to 15 (the index plus several
 pages). A loop that runs out of turns returns a `[incomplete: …]` marker rather
 than an answer; `wiki_query.py` exits non-zero when it sees one, so a truncated
@@ -141,8 +144,20 @@ silent either.
 
 Vault-path-parameterized file I/O against `raw/` and `wiki/` — every
 function takes `vault_path` explicitly, so the same functions serve any
-vault. `INGEST_TOOL_SCHEMAS` / `QUERY_TOOL_SCHEMAS` are the OpenAI-style
-tool schemas passed to `run_agent`.
+vault. The OpenAI-style tool schemas passed to `run_agent` live here too, one
+list per job rather than one list for everything: `PLAN_TOOL_SCHEMAS`,
+`CREATE_PAGE_TOOL_SCHEMAS`, `UPDATE_PAGE_TOOL_SCHEMAS` and `LOG_TOOL_SCHEMAS`
+for the three ingest stages, and `QUERY_TOOL_SCHEMAS` for the read side. Nine
+distinct tools across the ingest, and no stage sees all nine.
+
+Stage 2 having two lists is the point, not a convenience. Which one a unit gets
+is decided by whether its page is already on disk — not by what the plan called
+the action, because the plan was a guess made before anything was read. A unit
+updating an existing page is offered `edit_wiki_page` and **no tool that can
+replace a file**; a unit creating a new one is offered `write_wiki_page` and no
+way to edit what isn't there. Neither set can do the other's job, so the model
+cannot pick wrong, and the whole-file rewrite that used to lose lines and bake
+in escaping cannot happen on an update at all.
 
 It also has a small CLI for inspecting what the agent would see, which is the
 quickest way to check the ingest queue's order or spot a page the model filed
@@ -152,6 +167,21 @@ under a name you didn't expect:
 .venv/bin/python -m agent.wiki_tools list-raw --vault ~/Vaults/llm-wiki-learnings
 .venv/bin/python -m agent.wiki_tools list-wiki --vault ~/Vaults/llm-wiki-learnings
 ```
+
+### `agent/wikilinks.py`
+
+One owner for Obsidian's `[[wiki-link]]` syntax — the pattern, and what counts
+as a link's target. It exists because four regexes across two files used to
+parse this and only one of them carried the hardening, which is how
+`wiki_lint --fix` came to write links back to disk using the pattern the
+detector had already been fixed to stop using. A check and the fix that repairs
+it cannot drift apart again without changing this one file.
+
+The pattern excludes backticks and newlines, so a `[[` inside a code span never
+opens a match and one unclosed `[[` never swallows the rest of the page — both
+from an observed failure, and both matching what Obsidian itself renders.
+`link_target` is the other half: `[[foo]]`, `[[foo.md]]`, `[[foo|alias]]` and
+`[[foo#section]]` all mean `foo`.
 
 ## Setup (from scratch)
 
@@ -218,15 +248,18 @@ Once a vault is set up and scheduled, this is the actual workflow:
    produced it. `logs/wiki_ingest.<vault-name>.log` is the record Python
    writes — one line per tool call, with its arguments and result — and it is
    what to read when a run's behaviour is actually in question. A source is
-   only marked done once a write actually lands — a page write, or the
-   `log.md` entry that closes out the source. If the local model reads a file
-   but returns without writing anything at all (a transient no-op that happens
-   on dense sources), the run re-attempts it a few times, then leaves it for
-   the next scheduled run — so a stuck file clears itself without intervention.
+   marked done only when **every page its plan named actually landed** and the
+   `log.md` entry closing out the source was written. A run that wrote some of
+   its pages and then died leaves the source unmarked, so the next run redoes
+   it in full. If the local model reads a file but returns without writing
+   anything at all (a transient no-op that happens on dense sources), the run
+   re-attempts it a few times, then leaves it for the next scheduled run — so a
+   stuck file clears itself without intervention.
 
-   Note the gap that leaves: a run that wrote *some* pages and then died still
-   counts as done and is never retried. That is the hole `wiki_lint.py`'s
-   source-coverage check exists to report after the fact — see step 6.
+   What that does *not* cover is a plan that was wrong in the first place: a
+   source whose plan never named a page it owed is marked done having written
+   everything it planned. That is what `wiki_lint.py`'s source-coverage check
+   reports after the fact — see step 6.
 4. **Browse the result in Obsidian.** `<vault>/wiki/` is plain markdown —
    open the vault normally in the Obsidian app and start from
    `wiki/index.md`, the table of contents the agent maintains.
