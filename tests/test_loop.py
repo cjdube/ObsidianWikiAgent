@@ -162,6 +162,24 @@ def test_ollama_model_explicit_beats_env(monkeypatch):
     assert loop._ollama_model("explicit") == "explicit"
 
 
+def test_ollama_host_rejects_remote_without_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example.test")
+    monkeypatch.delenv("ALLOW_REMOTE_OLLAMA", raising=False)
+    try:
+        loop._ollama_host()
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "ALLOW_REMOTE_OLLAMA" in str(e)
+
+
+def test_ollama_host_allows_loopback_and_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434/")
+    assert loop._ollama_host() == "http://127.0.0.1:11434"
+    monkeypatch.setenv("OLLAMA_HOST", "https://ollama.example.test")
+    monkeypatch.setenv("ALLOW_REMOTE_OLLAMA", "1")
+    assert loop._ollama_host() == "https://ollama.example.test"
+
+
 def test_gemini_model_raises_for_complete_text_too(monkeypatch):
     """complete_text skipped this check and built 'models/None:generateContent'."""
     monkeypatch.setenv("GEMINI_API_KEY", "k")

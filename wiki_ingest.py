@@ -52,7 +52,7 @@ from agent.wiki_tools import (
     list_index_sections,
     list_raw_files,
     list_unsorted_raw_files,
-    list_wiki_pages,
+    search_wiki_pages,
     mark_ingested,
     move_raw_file,
     page_exists,
@@ -163,7 +163,7 @@ touch. You are not writing any page content in this step — a later step writes
 each page, one at a time.
 
 1. Read the source document in full.
-2. List the existing wiki pages. This is how you tell a new page from an \
+2. Search the existing wiki pages for each topic. This is how you tell a new page from an \
 existing one: if a page already covers the entity or concept, the action is \
 'update', not 'create'. Never propose a second page for something the wiki \
 already covers under a different name.
@@ -345,7 +345,7 @@ def _plan_dispatch(vault_path: str, plan: _Plan) -> dict:
 
     return {
         "read_raw_file": functools.partial(read_raw_file, vault_path),
-        "list_wiki_pages": functools.partial(list_wiki_pages, vault_path),
+        "search_wiki_pages": functools.partial(search_wiki_pages, vault_path),
         "list_index_sections": functools.partial(list_index_sections, vault_path),
         "submit_plan": _submit_plan,
         # Unadvertised but dispatchable, in every stage — a vault's RULES.md is
@@ -404,7 +404,7 @@ def _execute_dispatch(
             return result
         return call
 
-    def _this_page_only(fn, tool: str):
+    def _this_page_only(fn, tool: str, argument: str = "name"):
         """Refuse the call unless it names this step's page, then write that
         name rather than the one that arrived — identical names can still be
         spelled differently, and the spelling siblings link to is this one.
@@ -427,15 +427,19 @@ def _execute_dispatch(
                              f"this source are being written by their own "
                              f"separate steps."
                 }
-            return fn(name=page, **kwargs)
+            return fn(**{argument: page}, **kwargs)
         return call
 
     tools = {
         "read_raw_file": functools.partial(read_raw_file, vault_path),
         "read_wiki_page": functools.partial(read_wiki_page, vault_path),
-        "update_index": functools.partial(update_index, vault_path),
         "read_index": functools.partial(read_index, vault_path),
     }
+    tools["update_index"] = _this_page_only(
+        _counted(functools.partial(update_index, vault_path)),
+        "update_index",
+        argument="page",
+    )
     if exists:
         tools["edit_wiki_page"] = _this_page_only(
             _counted(functools.partial(edit_wiki_page, vault_path, source)),
@@ -668,7 +672,9 @@ def _execute_unit(
         # and the log is the record outside the model's reach.
         verb = "Wrote" if writes else "No write from"
         logger.info(f"{verb} '{unit['name']}' for '{filename}': {result}")
-        return bool(writes)
+        # A page write without its deterministic index update is incomplete:
+        # the next run would see a page that exists but no index entry.
+        return writes.count >= 2
 
     return _attempt(f"writing '{unit['name']}' for '{filename}'", logger, run)
 
@@ -788,7 +794,10 @@ def ingest_vault(vault_path: str, logger, plan_only: bool = False) -> int:
             f"or a vision model, not a text read: {', '.join(binaries)}"
         )
 
-    raw_files = list_raw_files(vault_path, scan).get("files", [])
+    raw_result = list_raw_files(vault_path, scan)
+    if "error" in raw_result:
+        raise RuntimeError(raw_result["error"])
+    raw_files = raw_result.get("files", [])
     already_ingested = set(get_ingested_sources(vault_path))
     pending = [f for f in raw_files if f not in already_ingested]
 

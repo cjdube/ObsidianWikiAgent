@@ -33,16 +33,27 @@ from agent.common import setup_logger, trim_launchd_log
 from agent.notify import notify_failure
 
 
+def _git_timeout() -> int:
+    return int(os.getenv("VAULT_SNAPSHOT_GIT_TIMEOUT", "120"))
+
+
 def _git(vault: Path, *args: str) -> subprocess.CompletedProcess:
     # GIT_TERMINAL_PROMPT=0: there is no tty under launchd, so a missing
     # credential must fail and be logged rather than block on a username
     # prompt forever.
-    return subprocess.run(
-        ["git", "-C", str(vault), *args],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-    )
+    try:
+        return subprocess.run(
+            ["git", "-C", str(vault), *args],
+            capture_output=True,
+            text=True,
+            timeout=_git_timeout(),
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired as e:
+        return subprocess.CompletedProcess(
+            ["git", "-C", str(vault), *args], 124, "",
+            f"timed out after {_git_timeout()}s",
+        )
 
 
 def snapshot_vault(vault: str, logger) -> Optional[str]:

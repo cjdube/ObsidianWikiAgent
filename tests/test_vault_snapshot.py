@@ -65,6 +65,19 @@ def test_non_git_directory_fails(tmp_path, logger):
     assert vs.snapshot_vault(str(plain), logger) is not None
 
 
+def test_git_command_timeout_is_reported(tmp_path, monkeypatch, logger):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(vs.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(
+        subprocess.TimeoutExpired(k.get("args", a[0]), 1)
+    ))
+
+    result = vs._git(repo, "status")
+
+    assert result.returncode == 124
+    assert "timed out" in result.stderr
+
+
 def test_clean_repo_makes_no_commit(repo, logger):
     before = head_message(repo)
     assert vs.snapshot_vault(str(repo), logger) is None

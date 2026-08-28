@@ -17,6 +17,8 @@ import inspect
 import json
 import logging
 import os
+import ipaddress
+from urllib.parse import urlparse
 import random
 import time
 from typing import Callable, Optional
@@ -72,6 +74,25 @@ def _ollama_model(explicit: Optional[str] = None) -> str:
             "name is not a tag Ollama resolves."
         )
     return model
+
+
+def _ollama_host(explicit: Optional[str] = None) -> str:
+    """Resolve Ollama's endpoint without silently sending vault data off-box."""
+    host = (explicit or os.getenv("OLLAMA_HOST") or "http://localhost:11434").strip()
+    parsed = urlparse(host)
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"invalid OLLAMA_HOST '{host}'")
+    try:
+        loopback = ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        loopback = hostname.lower() == "localhost"
+    if not loopback and os.getenv("ALLOW_REMOTE_OLLAMA", "").lower() not in {"1", "true", "yes"}:
+        raise RuntimeError(
+            "OLLAMA_HOST points to a remote server; set ALLOW_REMOTE_OLLAMA=1 "
+            "only if sending vault contents off this machine is intentional"
+        )
+    return host.rstrip("/")
 
 
 # run_agent returns a string either way, so this is how a caller tells a real
@@ -566,7 +587,7 @@ def _run_ollama(
     So the caller decides, one stage at a time; see wiki_ingest.py.
     """
     model = _ollama_model(model)
-    host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    host = _ollama_host(host)
     timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
     options = _ollama_options()
     cap = f"num_predict={options['num_predict']}"
@@ -793,7 +814,7 @@ def complete_text(
         return "".join(p.get("text", "") for p in parts).strip()
 
     model = _ollama_model(model)
-    host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    host = _ollama_host(host)
     resp = _post_with_retry(
         f"{host}/api/chat",
         {

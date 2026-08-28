@@ -754,6 +754,18 @@ def test_main_turns_an_exhausted_budget_into_an_alert(vault, monkeypatch):
     assert "abandoned" in pushed[0][1]
 
 
+def test_main_treats_incomplete_deep_judgment_as_failure(vault, monkeypatch):
+    pushed = []
+    monkeypatch.setattr(wl, "notify_failure", lambda *a, **k: pushed.append(1))
+    vault.page("a", good_page())
+    vault.index("# Index\n\n- [[a]] s.\n")
+    monkeypatch.setattr(wl, "run_agent", lambda **kw: "[incomplete: hit max_iterations=60 tool calls without reaching a final answer]")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+
+    assert wl.main() == 1
+    assert pushed == [1]
+
+
 def test_check_format_accepts_a_citation_to_a_binary_source(vault):
     """A PNG in raw/ is hidden from the model but is still a real file, so a
     page citing it has not invented anything."""

@@ -190,6 +190,8 @@ class RawScan(NamedTuple):
     text: list[str]
     binary: list[str]
     unsorted: list[str]
+    unsafe: list[str]
+    collisions: dict[str, list[str]]
 
 
 def scan_raw(vault_path: str) -> RawScan:
@@ -201,7 +203,7 @@ def scan_raw(vault_path: str) -> RawScan:
     """
     raw_dir = _raw_dir(vault_path)
     if not raw_dir.exists():
-        return RawScan([], [], [])
+        return RawScan([], [], [], [], {})
 
     # Keyed by basename (the .ingested.json identity), so a name appearing in
     # two directories is one queue entry — dated by the older copy, which is how
@@ -209,10 +211,18 @@ def scan_raw(vault_path: str) -> RawScan:
     oldest: dict[str, float] = {}
     binary: set[str] = set()
     unsorted: list[str] = []
+    unsafe: list[str] = []
+    locations: dict[str, list[str]] = {}
 
     for p in raw_dir.rglob("*"):
-        if not p.is_file() or p.name.startswith("."):
+        if p.name.startswith("."):
             continue
+        if p.is_symlink():
+            unsafe.append(p.relative_to(raw_dir).as_posix())
+            continue
+        if not p.is_file():
+            continue
+        locations.setdefault(p.name, []).append(p.relative_to(raw_dir).as_posix())
         if not _is_text_source(p):
             binary.add(p.name)
             continue
@@ -225,10 +235,18 @@ def scan_raw(vault_path: str) -> RawScan:
         if p.name not in oldest or mtime < oldest[p.name]:
             oldest[p.name] = mtime
 
+    collisions = {
+        name: sorted(paths) for name, paths in locations.items() if len(paths) > 1
+    }
     return RawScan(
-        text=[n for n, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))],
+        text=[
+            n for n, _ in sorted(oldest.items(), key=lambda kv: (kv[1], kv[0]))
+            if n not in collisions
+        ],
         binary=sorted(binary),
         unsorted=sorted(unsorted),
+        unsafe=sorted(unsafe),
+        collisions=collisions,
     )
 
 
@@ -256,7 +274,19 @@ def list_raw_files(vault_path: str, scan: RawScan = None) -> dict:
 
     `scan` lets a caller that has already walked raw/ hand that work over
     instead of paying for it twice; it is taken here when omitted."""
-    return {"files": (scan or scan_raw(vault_path)).text}
+    scan = scan or scan_raw(vault_path)
+    result = {"files": scan.text}
+    if scan.unsafe:
+        result["error"] = (
+            "refusing raw source symlink(s): " + ", ".join(scan.unsafe)
+        )
+    if scan.collisions:
+        details = "; ".join(
+            f"duplicate raw filename '{name}': {', '.join(paths)}"
+            for name, paths in sorted(scan.collisions.items())
+        )
+        result["error"] = "; ".join(filter(None, (result.get("error"), details)))
+    return result
 
 
 def list_binary_raw_files(vault_path: str, scan: RawScan = None) -> dict:
@@ -272,17 +302,33 @@ def read_raw_file(vault_path: str, filename: str) -> dict:
         path = _safe_raw_path(vault_path, filename)
     except ValueError as e:
         return {"error": str(e)}
-    if not path.is_file():
+    if any(part.startswith(".") for part in Path(filename).parts):
+        return {"error": f"raw file '{filename}' is hidden — refusing to read it"}
+    if (raw_dir / filename).is_symlink():
+        return {"error": f"raw file '{filename}' is a symlink — refusing to read it"}
+    if len(Path(filename).parts) == 1:
         # Sorted into a subdirectory since it was last at the top level; find
-        # it by basename anywhere under raw/. rglob stays under raw_dir, so the
-        # fallback can't escape even though the guard above only vetted the
-        # direct path. glob.escape because the name comes from the model: an
-        # unescaped '*' or '[' would make this match some *other* file and
-        # return it as though it were the one asked for.
+        # every exact basename match anywhere under raw/. glob.escape because
+        # the name comes from the model: an unescaped '*' or '[' would make this
+        # match some *other* file and return it as though it were the requested
+        # source.
         matches = [p for p in raw_dir.rglob(glob.escape(filename)) if p.is_file()]
         if not matches:
             return {"error": f"raw file '{filename}' not found"}
+        if any(p.is_symlink() for p in matches):
+            return {"error": f"raw file '{filename}' is a symlink — refusing to read it"}
+        if len(matches) > 1:
+            locations = ", ".join(
+                sorted(p.relative_to(raw_dir).as_posix() for p in matches)
+            )
+            return {
+                "error": f"raw file '{filename}' is ambiguous — found at {locations}"
+            }
         path = matches[0]
+    elif not path.is_file():
+        return {"error": f"raw file '{filename}' not found"}
+    if not _is_text_source(path):
+        return {"error": f"raw file '{filename}' is binary — refusing to decode it as text"}
     try:
         return {"content": path.read_text(encoding="utf-8", errors="replace")}
     except Exception as e:
@@ -382,6 +428,24 @@ def list_wiki_pages(vault_path: str) -> dict:
         and p.name not in RESERVED
     )
     return {"pages": pages}
+
+
+def search_wiki_pages(vault_path: str, query: str, limit: int = 40) -> dict:
+    """Return a bounded set of pages relevant to a filename/title/summary query."""
+    needle = query.strip().lower()
+    if not needle:
+        return {"error": "query is required"}
+    matches = []
+    for name in list_wiki_pages(vault_path)["pages"]:
+        path = _wiki_dir(vault_path) / name
+        content = path.read_text(encoding="utf-8", errors="replace")
+        summary = re.search(r"^\*\*Summary\*\*:\s*(.*)$", content, re.MULTILINE)
+        haystack = f"{name} {(summary.group(1) if summary else '')}".lower()
+        if needle in haystack:
+            matches.append({"name": name, "summary": (summary.group(1).strip() if summary else "")})
+            if len(matches) >= max(1, min(limit, 40)):
+                break
+    return {"pages": matches, "limit": max(1, min(limit, 40))}
 
 
 def read_wiki_page(vault_path: str, name: str) -> dict:
@@ -1137,6 +1201,19 @@ LIST_WIKI_PAGES_SCHEMA = {
     },
 }
 
+SEARCH_WIKI_PAGES_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "search_wiki_pages",
+        "description": "Find relevant wiki pages by matching a short term against page names and Summary lines. Results are bounded; use read_wiki_page for details.",
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "A focused topic or name to search for."}},
+            "required": ["query"],
+        },
+    },
+}
+
 READ_WIKI_PAGE_SCHEMA = {
     "type": "function",
     "function": {
@@ -1277,7 +1354,7 @@ SUBMIT_PLAN_SCHEMA = {
 # whole cost this split exists to remove back into the planning context.
 PLAN_TOOL_SCHEMAS = [
     READ_RAW_FILE_SCHEMA,
-    LIST_WIKI_PAGES_SCHEMA,
+    SEARCH_WIKI_PAGES_SCHEMA,
     LIST_INDEX_SECTIONS_SCHEMA,
     SUBMIT_PLAN_SCHEMA,
 ]
@@ -1322,9 +1399,8 @@ LOG_TOOL_SCHEMAS = [
 # answering questions about the wiki as a whole, which is what a table of
 # contents is for, and neither runs in a loop that accumulates page after page.
 QUERY_TOOL_SCHEMAS = [
-    LIST_WIKI_PAGES_SCHEMA,
+    SEARCH_WIKI_PAGES_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
-    READ_INDEX_SCHEMA,
 ]
 
 
@@ -1336,9 +1412,8 @@ def query_dispatch(vault_path: str) -> dict:
     it by hand.
     """
     return {
-        "list_wiki_pages": functools.partial(list_wiki_pages, vault_path),
+        "search_wiki_pages": functools.partial(search_wiki_pages, vault_path),
         "read_wiki_page": functools.partial(read_wiki_page, vault_path),
-        "read_index": functools.partial(read_index, vault_path),
     }
 
 

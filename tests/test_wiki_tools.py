@@ -58,6 +58,52 @@ def test_read_raw_file_reads_and_falls_back_to_subdir(vault):
     assert wt.read_raw_file(vault.path, "nested.txt")["content"] == "nested content"
 
 
+def test_read_raw_file_rejects_a_nested_symlink_outside_raw(vault):
+    outside = vault.root / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    link = vault.root / "raw" / "daily-notes" / "leak.txt"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(outside)
+
+    result = wt.read_raw_file(vault.path, "leak.txt")
+
+    assert "error" in result
+    assert "symlink" in result["error"]
+
+    listing = wt.list_raw_files(vault.path)
+    assert listing["files"] == []
+    assert "symlink" in listing["error"]
+
+
+def test_read_raw_file_rejects_a_direct_symlink_inside_raw(vault):
+    target = vault.raw("target.txt", "content")
+    (vault.root / "raw" / "alias.txt").symlink_to(target)
+
+    result = wt.read_raw_file(vault.path, "alias.txt")
+
+    assert "error" in result
+    assert "symlink" in result["error"]
+
+
+def test_read_raw_file_rejects_binary_content_even_when_named_directly(vault):
+    path = vault.root / "raw" / "sneaky.md"
+    path.write_bytes(b"# plausible title\x00binary")
+
+    result = wt.read_raw_file(vault.path, "sneaky.md")
+
+    assert "error" in result
+    assert "binary" in result["error"]
+
+
+def test_read_raw_file_rejects_hidden_content_not_present_in_the_queue(vault):
+    vault.raw(".private", "secret")
+
+    result = wt.read_raw_file(vault.path, ".private")
+
+    assert "error" in result
+    assert "hidden" in result["error"]
+
+
 # --- link parsing ----------------------------------------------------------
 
 
@@ -228,8 +274,9 @@ def test_no_ingest_stage_offers_the_whole_index():
     assert "list_index_sections" in [
         t["function"]["name"] for t in wt.PLAN_TOOL_SCHEMAS
     ]
-    # The read side still gets the full table of contents.
-    assert "read_index" in [t["function"]["name"] for t in wt.QUERY_TOOL_SCHEMAS]
+    # The read side gets bounded search results, not the full table of contents.
+    assert "search_wiki_pages" in [t["function"]["name"] for t in wt.QUERY_TOOL_SCHEMAS]
+    assert "read_index" not in [t["function"]["name"] for t in wt.QUERY_TOOL_SCHEMAS]
 
 
 def test_planning_stage_cannot_read_or_write_pages():
@@ -471,6 +518,17 @@ def test_list_wiki_pages_skips_reserved_and_dotfiles(vault):
     assert wt.list_wiki_pages(vault.path)["pages"] == ["real.md"]
 
 
+def test_search_wiki_pages_is_relevant_and_bounded(vault):
+    for i in range(45):
+        vault.page(f"topic-{i}", f"# Topic {i}\n\n**Summary**: agents and tools\n")
+    vault.page("other", "# Other\n\n**Summary**: unrelated\n")
+
+    result = wt.search_wiki_pages(vault.path, "agents")
+
+    assert len(result["pages"]) == 40
+    assert all("agents" in item["summary"] for item in result["pages"])
+
+
 def test_list_raw_files_recurses_and_skips_dotfiles(vault):
     vault.raw("a.txt")
     vault.raw("b.txt", subdir="daily-notes")
@@ -505,16 +563,21 @@ def test_list_raw_files_ties_break_on_name(vault):
     assert wt.list_raw_files(vault.path)["files"] == ["a.md", "b.md"]
 
 
-def test_list_raw_files_dates_a_duplicate_name_by_its_older_copy(vault):
-    # One basename is one queue entry (that's the .ingested.json identity), and
-    # how long it has waited is measured from the older copy.
+def test_list_raw_files_refuses_duplicate_basenames(vault):
     vault.raw("recent.md")
     vault.raw("dupe.md")
     vault.raw("dupe.md", subdir="daily-notes")
-    old = time.time() - 5 * 86400
-    os.utime(vault.root / "raw" / "dupe.md", (old, old))
 
-    assert wt.list_raw_files(vault.path)["files"] == ["dupe.md", "recent.md"]
+    result = wt.list_raw_files(vault.path)
+
+    assert result["files"] == ["recent.md"]
+    assert "duplicate raw filename 'dupe.md'" in result["error"]
+    assert "dupe.md" in result["error"]
+    assert "daily-notes/dupe.md" in result["error"]
+
+    read = wt.read_raw_file(vault.path, "dupe.md")
+    assert "error" in read
+    assert "ambiguous" in read["error"]
 
 
 def test_list_unsorted_raw_files_top_level_only(vault):

@@ -14,10 +14,11 @@ from agent.wiki_tools import get_ingested_sources
 
 
 @pytest.fixture(autouse=True)
-def _no_sorting(monkeypatch):
+def _no_sorting(vault, monkeypatch):
     """The sort step is exercised in its own tests; stub it out so these read
     as ingest-only."""
     monkeypatch.setattr(wiki_ingest, "sort_raw_files", lambda *a, **k: None)
+    vault.index("# Index\n\n## S\n\n")
 
 
 @pytest.fixture(autouse=True)
@@ -73,7 +74,10 @@ def _stages(pages=None, fail=(), dead_stage=None):
                     name=name, section="Notes", content=f"- from the source\n"
                 )
             else:
-                dispatch["write_wiki_page"](name=name, content=f"# {name}\n")
+                dispatch["write_wiki_page"](
+                    name=name, content=f"# {name}\n\n**Summary**: covered\n"
+                )
+            dispatch["update_index"](name=name, section="S")
             return "wrote"
         if dead_stage == "log":
             return "answered without logging"
@@ -348,6 +352,21 @@ def test_successful_source_is_marked(vault, monkeypatch):
 
     assert wiki_ingest.ingest_vault(vault.path, _Logger()) == 0
     assert len(get_ingested_sources(vault.path)) == 1
+
+
+def test_duplicate_raw_basenames_stop_before_either_source_is_ingested(
+    vault, monkeypatch
+):
+    vault.raw("same.md", subdir="daily-notes")
+    vault.raw("same.md", subdir="misc")
+    called = []
+    monkeypatch.setattr(wiki_ingest, "run_agent", lambda **kw: called.append(1))
+
+    with pytest.raises(RuntimeError, match="duplicate raw filename 'same.md'"):
+        wiki_ingest.ingest_vault(vault.path, _Logger())
+
+    assert called == []
+    assert get_ingested_sources(vault.path) == []
 
 
 # --- the split's own guarantees --------------------------------------------
@@ -644,6 +663,23 @@ def test_an_omitted_page_name_is_filled_in_rather_than_refused(vault):
 
     assert "written" in dispatch["write_wiki_page"](content="# Colima\n")
     assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n"
+
+
+def test_execute_step_without_index_update_is_not_marked_done(vault, monkeypatch):
+    vault.raw("source.md", "source text")
+    plan = wiki_ingest._Plan()
+    unit = {"name": "colima", "action": "create", "intent": "cover", "section": "S"}
+
+    def write_only(**kwargs):
+        dispatch = kwargs["dispatch"]
+        dispatch["write_wiki_page"](name="colima", content="# Colima\n")
+        return "wrote"
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", write_only)
+
+    assert not wiki_ingest._execute_unit(
+        vault.path, "source.md", unit, plan, "rules", _Logger()
+    )
 
 
 def test_the_page_written_is_the_one_siblings_link_to(vault):

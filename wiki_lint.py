@@ -48,7 +48,7 @@ from pathlib import Path
 
 from agent import budget
 from agent.common import setup_logger, trim_launchd_log
-from agent.loop import run_agent
+from agent.loop import INCOMPLETE_PREFIX, run_agent
 from agent.notify import notify_failure
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
@@ -704,7 +704,7 @@ def _lint(args, rules_path: Path, logger) -> int:
         budget.start_source("judgment pass", MAX_DEEP_RETRIES)
         # logger= gives the run a tool-call timeline (`tool_call name(args) ->
         # result`), which is the shape LocalLLMAgent's dashboard renders.
-        print(run_agent(
+        judgment = run_agent(
             system_prompt=rules_path.read_text(encoding="utf-8") + LINT_WRAPPER
             + "\n\nStructural findings already reported (do not repeat these):\n"
             + context,
@@ -713,7 +713,10 @@ def _lint(args, rules_path: Path, logger) -> int:
             dispatch=dispatch,
             max_iterations=60,
             logger=logger,
-        ))
+        )
+        print(judgment)
+        if judgment.startswith(INCOMPLETE_PREFIX):
+            raise RuntimeError(f"deep judgment incomplete: {judgment}")
 
     logger.info(
         f"Wiki lint run complete — {len(pages)} pages checked, "
@@ -782,7 +785,8 @@ def main() -> int:
         "--fix",
         action="store_true",
         help="Apply the safe, mechanical fixes (strip self-links, de-link dead "
-             "index entries) before reporting. Judgment calls are left alone.",
+             "index entries, unescape marked text) before reporting. Judgment "
+             "calls are left alone.",
     )
     parser.add_argument(
         "--json",

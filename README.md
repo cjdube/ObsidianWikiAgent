@@ -508,5 +508,5 @@ on whether you have a `config/.env`.
   *write* this code. The one external API this can call is Gemini, and only
   when `LLM_PROVIDER=gemini` is set for that run (see the top of this file).
 - `config/.env` and `logs/*.log*` are gitignored — the trailing `*` covers the
-  rotated `.log.1` backups, which contain every tool call's full result and so
-  hold verbatim vault content.
+  rotated `.log.1` backups, which contain clipped tool-call arguments and
+  results and may still hold excerpts of vault content.
