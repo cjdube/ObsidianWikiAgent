@@ -30,6 +30,15 @@ Optional on both sides; see the `WREN_RUN_LOG` key in
 integration is the log format described under [Scheduling](#scheduling--launchd),
 and this repo runs standalone without it.
 
+## Coding-agent guidance
+
+Codex and Claude Code are both supported for development. [`AGENTS.md`](AGENTS.md)
+is the canonical repository guidance; [`CLAUDE.md`](CLAUDE.md) imports it as a
+compatibility bridge, and [`docs/agent-context.md`](docs/agent-context.md) holds
+the detailed project history agents load only when it is relevant. Neither
+coding agent is a runtime dependency. A vault's `RULES.md` remains separate
+runtime policy for that vault.
+
 ## Architecture
 
 ```
