@@ -1391,3 +1391,24 @@ def test_search_looks_through_a_md_extension_on_the_query(vault):
     names = [p["name"] for p in wt.search_wiki_pages(vault.path, "claude-code.md")["pages"]]
 
     assert names == ["claude-code.md"]
+
+
+def test_update_index_files_a_page_named_in_the_case_the_plan_used(vault):
+    # write_wiki_page lower-cases through _safe_page_path, so a plan naming
+    # 'AI-Chat-Learnings' produces ai-chat-learnings.md. update_index compared
+    # the raw string and refused its own page; stage 2 binds the name, so the
+    # model could not spell its way out and the page finished under Unfiled.
+    vault.page("ai-chat-learnings", "# AI Chat Learnings\n\n**Summary**: s.\n")
+
+    result = wt.update_index(vault.path, "AI-Chat-Learnings", "Daily Logs")
+
+    assert result.get("filed") == "ai-chat-learnings"
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "- [[ai-chat-learnings]]" in index
+    assert "## Daily Logs" in index
+
+
+def test_update_index_still_refuses_a_name_that_leaves_the_wiki(vault):
+    vault.page("a", "# A\n\n**Summary**: s.\n")
+    result = wt.update_index(vault.path, "../outside", "Topics")
+    assert "error" in result

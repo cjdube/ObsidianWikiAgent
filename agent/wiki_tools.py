@@ -1145,7 +1145,18 @@ def update_index(vault_path: str, page: str, section: str) -> dict:
     # it writes.
     pages = list_wiki_pages(vault_path)["pages"]
 
-    name = page.strip().removesuffix(".md")
+    # Resolve through _safe_page_path rather than trimming the string here, so
+    # this agrees with writing and reading about which file a name means. It
+    # did not: that function lower-cases, this did not, so a plan naming its
+    # page 'AI-Chat-Learnings-2026-08-28' wrote
+    # 'ai-chat-learnings-2026-08-28.md' and was then told the page did not
+    # exist. Stage 2 binds the page name, so the model could not spell its way
+    # out — on 2026-08-29 that step spent 6 calls and 3 whole loops being
+    # refused, and the page finished under Unfiled.
+    try:
+        name = _safe_page_path(vault_path, page.strip()).name[: -len(".md")]
+    except ValueError as e:
+        return {"error": str(e)}
     if name not in {p[: -len(".md")] for p in pages}:
         return {"error": f"no wiki page named '{name}' — write the page first"}
     section = section.strip().lstrip("#").strip()
