@@ -70,9 +70,18 @@ from agent.wiki_tools import (
 # conversation with one job, where the old single-pass ingest needed 30 to carry
 # a whole source from read to log in one context.
 #
-# Stage 1 reads the source, lists the pages and the index sections, then submits
-# the plan: 4 calls, plus room to re-read or retry one.
-MAX_PLAN_ITERATIONS = 8
+# Stage 1 reads the source, searches the wiki once per topic it found, lists the
+# index sections, then submits the plan. The per-topic search is why this is not
+# the 4 calls it used to be: the stage held list_wiki_pages, one call that
+# returned the whole vault, until search_wiki_pages replaced it to keep the
+# result bounded by the answer rather than by vault size. The budget did not
+# move with it, and a daily source carries four to seven topics, so every source
+# in the 2026-08-29 runs finished planning on call 6, 7 or 8 of 8 — or ran out.
+# Which side of that a source landed on was luck: AI-Chat-Learnings-2026-08-28
+# exhausted three attempts in one run and planned on call 7 in the next, from
+# the same bytes. This is headroom over the observed worst case, not a measured
+# ceiling.
+MAX_PLAN_ITERATIONS = 14
 # Stage 2 reads the source, optionally reads the page it is updating, writes it,
 # and files it in the index: 4 calls. The extra slack is for the cut-off nudge in
 # agent/loop.py, which costs an iteration each time it fires — one page in the
