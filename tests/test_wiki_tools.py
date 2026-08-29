@@ -1379,3 +1379,15 @@ def test_search_still_returns_summary_only_mentions(vault):
     names = [p["name"] for p in wt.search_wiki_pages(vault.path, "gguf")["pages"]]
 
     assert names == ["ollama.md"]
+
+
+def test_search_looks_through_a_md_extension_on_the_query(vault):
+    """Models pass filenames as often as names. Squashing turns '.md' into
+    letters, so without stripping it first 'claude-code.md' matched nothing at
+    all — a regression the ranked search introduced over the substring match it
+    replaced, and one the 2026-08-29 live run spent iterations on."""
+    vault.page("claude-code", "# Claude Code\n\n**Summary**: the CLI\n")
+
+    names = [p["name"] for p in wt.search_wiki_pages(vault.path, "claude-code.md")["pages"]]
+
+    assert names == ["claude-code.md"]

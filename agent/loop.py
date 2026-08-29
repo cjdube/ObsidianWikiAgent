@@ -183,10 +183,16 @@ def _dispatch_tool(
         except Exception as e:
             result = {"error": f"tool '{fn_name}' raised: {e}"}
     if logger:
-        logger.info(
+        # A refused call is logged at WARNING so it carries the level its
+        # content already claims. These are not fatal — the model is handed the
+        # error and usually recovers — but they are the trail a stuck stage
+        # leaves, and at INFO they were indistinguishable from the successful
+        # calls around them in a log that runs to thousands of lines.
+        line = (
             f"tool_call {fn_name}({_clip_values(fn_args)}) -> "
             f"{json.dumps(_clip_values(result))}"
         )
+        logger.warning(line) if "error" in result else logger.info(line)
     return result
 
 

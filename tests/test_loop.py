@@ -877,3 +877,23 @@ def test_a_gemini_reply_cut_off_before_any_tool_call_is_not_a_final_answer(monke
     said = [t for t in sent[1]["contents"] if t["role"] == "user"]
     assert len(said) == 2, "the nudge should be the only turn added"
     assert "cut off" in said[1]["parts"][0]["text"], "Gemini wants parts, not content"
+
+
+def test_a_refused_tool_call_is_logged_at_warning(caplog):
+    """The log runs to thousands of INFO lines, so a call the dispatch refused
+    was invisible in the successful ones around it. It is not fatal — the model
+    is handed the error and usually recovers — but it is the trail a stuck stage
+    leaves, and it should read as one."""
+    with caplog.at_level(logging.DEBUG):
+        loop._dispatch_tool("nope", {}, {}, logging.getLogger("t"))
+
+    levels = {r.levelno for r in caplog.records if "tool_call nope" in r.message}
+    assert levels == {logging.WARNING}
+
+
+def test_a_successful_tool_call_stays_at_info(caplog):
+    with caplog.at_level(logging.DEBUG):
+        loop._dispatch_tool("ok", {}, {"ok": lambda: {"written": "x.md"}}, logging.getLogger("t"))
+
+    levels = {r.levelno for r in caplog.records if "tool_call ok" in r.message}
+    assert levels == {logging.INFO}

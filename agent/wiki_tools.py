@@ -469,7 +469,10 @@ def search_wiki_pages(vault_path: str, query: str, limit: int = 40) -> dict:
     if not needle:
         return {"error": "query is required"}
     cap = max(1, min(limit, 40))
-    squashed = _squash(needle)
+    # Models pass filenames as often as names — 'claude-code.md' for the page
+    # 'claude-code'. Squashing keeps the '.md' as letters, so the extension
+    # would otherwise be the one spelling difference this cannot see through.
+    squashed = _squash(needle[:-3] if needle.endswith(".md") else needle)
     scored = []
     for name in list_wiki_pages(vault_path)["pages"]:
         path = _wiki_dir(vault_path) / name
@@ -482,10 +485,21 @@ def search_wiki_pages(vault_path: str, query: str, limit: int = 40) -> dict:
         # An identity hit means the page is *about* the query; a summary hit
         # means it mentions it. Sorting on that, then on name so ties stay
         # stable, is what keeps a topic page ahead of a month of daily logs.
-        if squashed and squashed in _squash(identity):
+        #
+        # Exact is its own tier above partial because alphabetical tie-breaking
+        # is arbitrary among identity matches, and arbitrary loses to the page
+        # the query actually named: 'claude-code' ranked
+        # 50-claude-code-tips-and-best-practices-for-daily-use.md above
+        # claude-code.md purely on the leading digit.
+        parts = [_squash(stem)]
+        if title_match:
+            parts.append(_squash(title_match.group(1).strip()))
+        if squashed and squashed in parts:
             rank = 0
-        elif needle in summary.lower():
+        elif squashed and squashed in _squash(identity):
             rank = 1
+        elif needle in summary.lower():
+            rank = 2
         else:
             continue
         scored.append((rank, name, summary))
