@@ -430,22 +430,70 @@ def list_wiki_pages(vault_path: str) -> dict:
     return {"pages": pages}
 
 
+def _squash(text: str) -> str:
+    """Lowercase and drop everything that is not a letter or digit.
+
+    A page's filename and its title routinely spell one name two ways —
+    'local-llm-agent.md' is titled '# LocalLLMAgent' — and a search for either
+    spelling has to reach the same page. Squashing both sides makes them equal
+    without a word list.
+    """
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
 def search_wiki_pages(vault_path: str, query: str, limit: int = 40) -> dict:
-    """Return a bounded set of pages relevant to a filename/title/summary query."""
+    """Return a bounded set of pages relevant to a name/title/summary query.
+
+    Reads the title as well as the filename, and ranks before it truncates.
+    Both are the same bug seen from two sides. This matched only 'name +
+    Summary' and returned the first `limit` hits in directory order, so a query
+    for a project's actual name could not reach its page: 'LocalLLMAgent' is the
+    title of local-llm-agent.md and appears in neither of those fields, and even
+    when a page did match, common terms filled the cap with alphabetically
+    earlier daily logs that merely mention the word. Measured against the
+    2026-08-29 vault, 8 of 16 realistic queries hit the cap, and 'llm', 'model'
+    and 'chrome' each returned 40 pages without the topic page among them.
+
+    The ingest plan stage pays for that in iterations and in duplicate pages: a
+    planner that cannot find local-llm-agent.md re-searches spelling variants
+    and then plans a create, which is where locallmagent.md and
+    local-llma-agent.md came from. Identity matches therefore outrank
+    summary-only mentions, and truncation drops mentions rather than the page
+    the query named.
+
+    Scanning every page costs ~10ms over 500 pages, against ~10s for the model
+    call that asked, so the early exit this used to take was not worth its cost
+    in wrong answers.
+    """
     needle = query.strip().lower()
     if not needle:
         return {"error": "query is required"}
-    matches = []
+    cap = max(1, min(limit, 40))
+    squashed = _squash(needle)
+    scored = []
     for name in list_wiki_pages(vault_path)["pages"]:
         path = _wiki_dir(vault_path) / name
         content = path.read_text(encoding="utf-8", errors="replace")
-        summary = re.search(r"^\*\*Summary\*\*:\s*(.*)$", content, re.MULTILINE)
-        haystack = f"{name} {(summary.group(1) if summary else '')}".lower()
-        if needle in haystack:
-            matches.append({"name": name, "summary": (summary.group(1).strip() if summary else "")})
-            if len(matches) >= max(1, min(limit, 40)):
-                break
-    return {"pages": matches, "limit": max(1, min(limit, 40))}
+        summary_match = re.search(r"^\*\*Summary\*\*:\s*(.*)$", content, re.MULTILINE)
+        title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+        summary = summary_match.group(1).strip() if summary_match else ""
+        stem = name[:-3] if name.endswith(".md") else name
+        identity = f"{stem} {title_match.group(1).strip() if title_match else ''}"
+        # An identity hit means the page is *about* the query; a summary hit
+        # means it mentions it. Sorting on that, then on name so ties stay
+        # stable, is what keeps a topic page ahead of a month of daily logs.
+        if squashed and squashed in _squash(identity):
+            rank = 0
+        elif needle in summary.lower():
+            rank = 1
+        else:
+            continue
+        scored.append((rank, name, summary))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return {
+        "pages": [{"name": n, "summary": s} for _, n, s in scored[:cap]],
+        "limit": cap,
+    }
 
 
 def read_wiki_page(vault_path: str, name: str) -> dict:
@@ -1205,7 +1253,7 @@ SEARCH_WIKI_PAGES_SCHEMA = {
     "type": "function",
     "function": {
         "name": "search_wiki_pages",
-        "description": "Find relevant wiki pages by matching a short term against page names and Summary lines. Results are bounded; use read_wiki_page for details.",
+        "description": "Find relevant wiki pages by matching a short term against page names, titles and Summary lines. Pages the term names are returned before pages that merely mention it, so if a page for a topic exists it is at the top of the results — spelling does not have to match the filename. Results are bounded; use read_wiki_page for details.",
         "parameters": {
             "type": "object",
             "properties": {"query": {"type": "string", "description": "A focused topic or name to search for."}},

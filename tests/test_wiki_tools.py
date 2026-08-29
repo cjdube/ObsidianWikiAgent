@@ -1343,3 +1343,39 @@ def test_every_vault_write_goes_through_atomic_write(vault, monkeypatch, write):
 
     write(vault)
     assert calls, "this write bypassed atomic_write"
+
+
+def test_search_finds_a_page_by_its_title_not_just_its_filename(vault):
+    """A page's filename and its title routinely spell one name two ways, and
+    the ingest planner searches the name the source used. Searching
+    'LocalLLMAgent' had to reach local-llm-agent.md and did not, so the planner
+    concluded no page existed and filed a duplicate."""
+    vault.page("local-llm-agent", "# LocalLLMAgent\n\n**Summary**: a local agent\n")
+
+    names = [p["name"] for p in wt.search_wiki_pages(vault.path, "LocalLLMAgent")["pages"]]
+
+    assert names == ["local-llm-agent.md"]
+
+
+def test_search_ranks_the_named_page_above_pages_that_mention_it(vault):
+    """Truncation used to drop in directory order, so common terms filled the
+    cap with alphabetically earlier daily logs and left the topic page out
+    entirely — 'llm', 'model' and 'chrome' each returned 40 pages without it."""
+    for i in range(45):
+        vault.page(f"aaa-log-{i:02d}", f"# Log {i}\n\n**Summary**: notes about ollama\n")
+    vault.page("ollama", "# Ollama\n\n**Summary**: the local runner\n")
+
+    result = wt.search_wiki_pages(vault.path, "ollama")
+
+    assert result["pages"][0]["name"] == "ollama.md"
+    assert len(result["pages"]) == 40
+
+
+def test_search_still_returns_summary_only_mentions(vault):
+    """Ranking mentions below named pages must not drop them — a topic with no
+    page of its own is exactly what the planner needs to see."""
+    vault.page("ollama", "# Ollama\n\n**Summary**: runs gguf models locally\n")
+
+    names = [p["name"] for p in wt.search_wiki_pages(vault.path, "gguf")["pages"]]
+
+    assert names == ["ollama.md"]
