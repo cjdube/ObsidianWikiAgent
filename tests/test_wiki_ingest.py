@@ -77,7 +77,7 @@ def _stages(pages=None, fail=(), dead_stage=None):
                 dispatch["write_wiki_page"](
                     name=name, content=f"# {name}\n\n**Summary**: covered\n"
                 )
-            dispatch["update_index"](name=name, section="S")
+            dispatch["update_index"](page=name, section="S")
             return "wrote"
         if dead_stage == "log":
             return "answered without logging"
@@ -695,3 +695,34 @@ def test_the_page_written_is_the_one_siblings_link_to(vault):
     dispatch["write_wiki_page"](name="COLIMA", content="# Colima\n")
 
     assert (vault.root / "wiki" / "colima.md").is_file()
+
+
+def test_the_guard_reads_the_argument_the_tool_actually_names(vault):
+    """update_index spells the page 'page', not 'name'. While the guard read
+    only 'name', every update_index call the model made raised TypeError on the
+    duplicate keyword, so no step could ever finish — the 2026-08-29 run burned
+    all twelve iterations per page and left its sources unmarked."""
+    vault.page("colima", "# Colima\n\n**Summary**: covered\n")
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "colima", writes, exists=True
+    )
+
+    assert dispatch["update_index"](page="colima", section="Tools")["filed"] == "colima"
+    assert writes
+
+
+def test_a_wrong_page_is_refused_through_the_argument_the_tool_names(vault):
+    """The other half: reading the real argument must also refuse a mismatch,
+    or filing an unrelated page under this source becomes possible."""
+    vault.page("podman", "# Podman\n")
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "colima", writes, exists=True
+    )
+
+    error = dispatch["update_index"](page="podman", section="Tools")["error"]
+
+    assert "colima" in error
+    assert "page='colima'" in error
+    assert not writes

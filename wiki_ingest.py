@@ -418,13 +418,18 @@ def _execute_dispatch(
         An omitted name is not a mismatch. There is exactly one page this step
         can be talking about, so filling it in beats spending an iteration.
         """
-        def call(name=None, **kwargs):
-            if name is not None and not same_page(vault_path, name, page):
+        def call(**kwargs):
+            # Read the page name out of whichever argument this tool spells it
+            # with. Naming it in the signature only ever guarded the tools that
+            # call it 'name'; update_index calls it 'page', so its name arrived
+            # in kwargs, went unchecked, and then collided with the bound one.
+            supplied = kwargs.pop(argument, None)
+            if supplied is not None and not same_page(vault_path, supplied, page):
                 return {
-                    "error": f"'{name}' is not this step's page — this step "
+                    "error": f"'{supplied}' is not this step's page — this step "
                              f"writes '{page}' and nothing else. Call {tool} "
-                             f"again with name='{page}'. The other pages from "
-                             f"this source are being written by their own "
+                             f"again with {argument}='{page}'. The other pages "
+                             f"from this source are being written by their own "
                              f"separate steps."
                 }
             return fn(**{argument: page}, **kwargs)
