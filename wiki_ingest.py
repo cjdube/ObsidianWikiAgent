@@ -200,7 +200,8 @@ write, read, or edit any page except the one you were given."""
 
 _EXECUTE_COMMON = """
 Then stop. Do not append to the log — a later step does that for the whole \
-source at once.
+source at once. Do not file this page in the index either: that is done for \
+you from the plan's section as soon as your write lands.
 
 The source filename is NOT a wiki page name. Cite it as plain text in inline \
 citations, exactly as given. Never write it as a wiki-link. Wiki-links point \
@@ -217,9 +218,6 @@ This page does not exist yet, so you are writing it from nothing.
 1. Read the source document for the material this page needs.
 2. Call write_wiki_page once with the complete page, following the vault's page \
 format above.
-3. Call update_index once, naming this page and its section. Do not write a \
-description — it is taken from the page's own Summary line. Never send the whole \
-index; you are naming one page's home, not rewriting the file.
 """ + _EXECUTE_COMMON
 
 UPDATE_WRAPPER = _EXECUTE_PREAMBLE + """
@@ -234,9 +232,6 @@ belongs. Anything the page already says, you do not say again.
 3. Call edit_wiki_page once. Send ONLY the new material — usually a bullet or a \
 short paragraph — and name the section it goes under. Do not repeat any \
 sentence that is already on the page, and do not send the page back to me.
-4. Call update_index once, naming this page and its section. Do not write a \
-description — it is taken from the page's own Summary line. Never send the whole \
-index; you are naming one page's home, not rewriting the file.
 
 The `**Sources**` and `**Last updated**` lines are maintained for you. Do not \
 write them, and do not include them in what you send.
@@ -449,8 +444,16 @@ def _execute_dispatch(
         "read_wiki_page": functools.partial(read_wiki_page, vault_path),
         "read_index": functools.partial(read_index, vault_path),
     }
+    # Unadvertised from here on — _file_planned_page files this page from the
+    # plan's section once the write lands, so the model is neither asked for the
+    # call nor offered the schema. It stays dispatchable for the same reason
+    # read_index does: a vault's RULES.md is in the system prompt and may tell
+    # the model in prose to file its pages, and a call that arrives anyway
+    # should work rather than come back as an unknown-tool error. It is
+    # deliberately not _counted: writes.count now means "the page was written",
+    # and an index call that landed without one must not read as success.
     tools["update_index"] = _this_page_only(
-        _counted(functools.partial(update_index, vault_path)),
+        functools.partial(update_index, vault_path),
         "update_index",
         argument="page",
     )
@@ -630,6 +633,36 @@ def _plan_source(vault_path: str, filename: str, rules: str, logger) -> _Plan:
     return plan
 
 
+def _file_planned_page(vault_path: str, unit: dict, logger) -> None:
+    """File one written page under the section its plan entry named.
+
+    Deliberately not a pass/fail the caller retries on. Everything this needs
+    is fixed before stage 2 starts — the page name and the plan's section — so
+    a second attempt would send the identical call and fail identically, having
+    rewritten the page to get there. A section this cannot use is a planning
+    problem, and the run says so in the log rather than throwing the write away.
+
+    A blank or rejected section is not guessed at either. Inventing a heading
+    would file the page somewhere nobody chose; leaving it lets _normalize_index
+    list it under Unfiled, which is exactly what that section is for.
+    """
+    section = unit.get("section", "").strip()
+    if not section:
+        logger.warning(
+            f"Plan gave no index section for '{unit['name']}' — it will appear "
+            "under the index's Unfiled heading."
+        )
+        return
+    result = update_index(vault_path, unit["name"], section)
+    if "error" in result:
+        logger.warning(
+            f"Could not file '{unit['name']}' under '{section}' "
+            f"({result['error']}) — it will appear under Unfiled."
+        )
+        return
+    logger.info(f"Filed '{unit['name']}' under '{section}'.")
+
+
 def _execute_unit(
     vault_path: str, filename: str, unit: dict, plan: _Plan, rules: str, logger
 ) -> bool:
@@ -665,8 +698,7 @@ def _execute_unit(
                 f"Source file to cite (plain text, never a wiki-link): "
                 f"'{filename}'\n"
                 f"Page to write: '{unit['name']}'\n"
-                f"What this page needs from the source: {unit['intent']}\n"
-                f"Index section: {unit['section']}\n\n"
+                f"What this page needs from the source: {unit['intent']}\n\n"
                 "Other pages being written from this same source, by their own "
                 "separate steps. These are the only wiki-links you may add for "
                 "this source — link to them where the text calls for it, and do "
@@ -686,9 +718,22 @@ def _execute_unit(
         # and the log is the record outside the model's reach.
         verb = "Wrote" if writes else "No write from"
         logger.info(f"{verb} '{unit['name']}' for '{filename}': {result}")
-        # A page write without its deterministic index update is incomplete:
-        # the next run would see a page that exists but no index entry.
-        return writes.count >= 2
+        # A page write without its index entry is incomplete: the next run would
+        # see a page that exists but nothing in the table of contents pointing
+        # at it. That used to be asked of the model, and checked here by
+        # requiring two writes — which caught the skip but could not fix it. A
+        # page whose write landed and whose index call did not was retried, and
+        # when the retries ran out the page stayed on disk, unfiled, with
+        # nothing reporting it. The vault reached 181 such pages that way.
+        #
+        # The section is known before this stage starts (submit_plan requires
+        # one per page), so nothing about filing needs the model. This follows
+        # update_index itself: naming a page's home is Python's job, and a
+        # guarantee belongs in code rather than in an instruction.
+        if not writes:
+            return False
+        _file_planned_page(vault_path, unit, logger)
+        return True
 
     return _attempt(f"writing '{unit['name']}' for '{filename}'", logger, run)
 

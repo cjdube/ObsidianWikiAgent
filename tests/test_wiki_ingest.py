@@ -77,7 +77,6 @@ def _stages(pages=None, fail=(), dead_stage=None):
                 dispatch["write_wiki_page"](
                     name=name, content=f"# {name}\n\n**Summary**: covered\n"
                 )
-            dispatch["update_index"](page=name, section="S")
             return "wrote"
         if dead_stage == "log":
             return "answered without logging"
@@ -100,7 +99,8 @@ def test_every_stage_dispatches_every_tool_it_advertises(vault):
     """A schema with no dispatch entry is an unknown-tool error mid-run, which
     costs a loop iteration and confuses the model. read_index is the deliberate
     other way round — dispatchable but unadvertised, so a RULES.md that names
-    the index in prose still works."""
+    the index in prose still works, and update_index joined it once filing
+    became Python's job."""
     from agent import wiki_tools as wt
 
     counter = wiki_ingest._WriteCounter()
@@ -114,7 +114,7 @@ def test_every_stage_dispatches_every_tool_it_advertises(vault):
     ):
         advertised = {t["function"]["name"] for t in schemas}
         assert advertised <= set(dispatch)
-        assert set(dispatch) - advertised <= {"read_index"}
+        assert set(dispatch) - advertised <= {"read_index", "update_index"}
 
 
 def test_only_the_stages_that_transcribe_turn_thinking_off(vault, monkeypatch):
@@ -665,21 +665,78 @@ def test_an_omitted_page_name_is_filled_in_rather_than_refused(vault):
     assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n"
 
 
-def test_execute_step_without_index_update_is_not_marked_done(vault, monkeypatch):
+def test_a_written_page_is_filed_even_when_the_model_never_files_it(vault, monkeypatch):
+    """The guarantee this stage exists to keep. Filing used to be asked of the
+    model and merely *checked* here; a step whose write landed and whose index
+    call did not was retried, and when the retries ran out the page stayed on
+    disk with nothing in the table of contents pointing at it. The live vault
+    reached 181 such pages. The section comes from the plan, so nothing about
+    filing needs the model."""
     vault.raw("source.md", "source text")
     plan = wiki_ingest._Plan()
-    unit = {"name": "colima", "action": "create", "intent": "cover", "section": "S"}
+    unit = {"name": "colima", "action": "create", "intent": "cover",
+            "section": "Tools"}
 
     def write_only(**kwargs):
-        dispatch = kwargs["dispatch"]
-        dispatch["write_wiki_page"](name="colima", content="# Colima\n")
+        kwargs["dispatch"]["write_wiki_page"](
+            name="colima", content="# Colima\n\n**Summary**: covered\n"
+        )
         return "wrote"
 
     monkeypatch.setattr(wiki_ingest, "run_agent", write_only)
 
+    assert wiki_ingest._execute_unit(
+        vault.path, "source.md", unit, plan, "rules", _Logger()
+    )
+    index = (Path(vault.path) / "wiki" / "index.md").read_text()
+    assert "## Tools" in index
+    assert "- [[colima]]" in index
+    assert "## Unfiled" not in index
+
+
+def test_a_step_that_writes_nothing_is_not_marked_done(vault, monkeypatch):
+    """Filing no longer stands in for the write. writes.count means "the page
+    was written" and nothing else, so a step that only touched the index must
+    still fail — otherwise a stray update_index call would mark a page done
+    that was never written."""
+    vault.raw("source.md", "source text")
+    vault.page("colima", "# Colima\n\n**Summary**: covered\n")
+    plan = wiki_ingest._Plan()
+    unit = {"name": "colima", "action": "update", "intent": "cover",
+            "section": "Tools"}
+
+    def index_only(**kwargs):
+        kwargs["dispatch"]["update_index"](page="colima", section="Tools")
+        return "filed but wrote nothing"
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", index_only)
+
     assert not wiki_ingest._execute_unit(
         vault.path, "source.md", unit, plan, "rules", _Logger()
     )
+
+
+def test_a_page_with_no_planned_section_is_still_written(vault, monkeypatch):
+    """A section this cannot use is a planning problem, not a reason to throw
+    the page away. Retrying would send the identical call and fail identically,
+    having rewritten the page to get there. _normalize_index lists it under
+    Unfiled, which is what that section is for."""
+    vault.raw("source.md", "source text")
+    plan = wiki_ingest._Plan()
+    unit = {"name": "colima", "action": "create", "intent": "cover", "section": ""}
+
+    def write_only(**kwargs):
+        kwargs["dispatch"]["write_wiki_page"](
+            name="colima", content="# Colima\n\n**Summary**: covered\n"
+        )
+        return "wrote"
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", write_only)
+
+    assert wiki_ingest._execute_unit(
+        vault.path, "source.md", unit, plan, "rules", _Logger()
+    )
+    assert (Path(vault.path) / "wiki" / "colima.md").is_file()
 
 
 def test_the_page_written_is_the_one_siblings_link_to(vault):
@@ -709,7 +766,6 @@ def test_the_guard_reads_the_argument_the_tool_actually_names(vault):
     )
 
     assert dispatch["update_index"](page="colima", section="Tools")["filed"] == "colima"
-    assert writes
 
 
 def test_a_wrong_page_is_refused_through_the_argument_the_tool_names(vault):

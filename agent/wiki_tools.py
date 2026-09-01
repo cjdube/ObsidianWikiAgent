@@ -1448,18 +1448,24 @@ PLAN_TOOL_SCHEMAS = [
 # bake in escaping cannot happen on an update at all; a page that does not exist
 # is offered no way to be edited, which would only fail. Neither set can do the
 # other's job, so the model cannot pick wrong.
+#
+# Neither set offers update_index. Filing a page under a section needs the page
+# name and the section, both settled before the stage starts (submit_plan
+# requires a section per page), so wiki_ingest._file_planned_page does it once
+# the write lands. Asking the model for a call whose arguments are already known
+# only adds a way for the page to end up written but unfiled, which is how this
+# vault accumulated 181 such pages. The tool stays dispatchable in
+# _execute_dispatch, unadvertised, the way read_index does.
 CREATE_PAGE_TOOL_SCHEMAS = [
     READ_RAW_FILE_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     WRITE_WIKI_PAGE_SCHEMA,
-    UPDATE_INDEX_SCHEMA,
 ]
 
 UPDATE_PAGE_TOOL_SCHEMAS = [
     READ_RAW_FILE_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
     EDIT_WIKI_PAGE_SCHEMA,
-    UPDATE_INDEX_SCHEMA,
 ]
 
 # Stage 3. One tool, because the only thing left to do is record what the other

@@ -313,9 +313,12 @@ def test_a_page_that_exists_is_offered_no_way_to_be_overwritten():
     assert "edit_wiki_page" in update
     assert "edit_wiki_page" not in create
     assert "write_wiki_page" in create
-    # Both still read the source, read the page, and file it.
+    # Both still read the source and read the page. Neither files it: the
+    # section is known from the plan before the stage starts, so
+    # wiki_ingest._file_planned_page does that once the write lands.
     for names in (update, create):
-        assert {"read_raw_file", "read_wiki_page", "update_index"} <= set(names)
+        assert {"read_raw_file", "read_wiki_page"} <= set(names)
+        assert "update_index" not in names
 
 
 def test_query_dispatch_covers_exactly_the_query_schemas(vault):
