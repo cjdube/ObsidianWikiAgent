@@ -211,8 +211,14 @@ from an observed failure, and both matching what Obsidian itself renders.
 2. Create the venv:
    ```bash
    python3.12 -m venv .venv
-   .venv/bin/pip install -r requirements.txt
+   .venv/bin/pip install -r requirements.lock
    ```
+   Install from `requirements.lock`, not `requirements.txt`. The lock is the
+   full closure at exact versions; `requirements.txt` pins only the two
+   packages this repo imports directly and leaves their dependencies free to
+   move on a rebuild. To change a dependency, edit `requirements.txt` and
+   regenerate the lock — the steps are in the lock's own header, and
+   `tests/test_requirements.py` fails if the two files disagree.
 3. Copy `config/.env.example` to `config/.env` and set `OLLAMA_MODEL` to your
    tag from step 1. `OLLAMA_HOST` defaults to `http://localhost:11434`.
 4. For each vault, make sure it has:
@@ -495,12 +501,15 @@ sort step in `wiki_ingest.py`, and the run budget and failure alerting in
 `agent/budget.py`, `wiki_ingest.py`, `wiki_lint.py` and `vault_snapshot.py`.
 The LLM HTTP layer is mocked, so no Ollama or Gemini is needed and nothing hits
 the network — and the suite pins its own model settings, so it does not depend
-on whether you have a `config/.env`.
+on whether you have a `config/.env`. `tests/test_requirements.py` also guards
+`requirements.txt` against `requirements.lock`.
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/pytest
 ```
+
+That one command is enough: `requirements-dev.txt` includes the lock.
 
 ## What's NOT here
 

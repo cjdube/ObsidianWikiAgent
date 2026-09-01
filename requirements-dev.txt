@@ -1,2 +1,9 @@
--r requirements.txt
+# Dev-only dependencies, deliberately unpinned and kept out of
+# requirements.lock: pytest breaking costs an afternoon, a broken scheduled
+# ingest costs a day of vault writes.
+#
+# The include below points at the lock, not requirements.txt, so
+# `pip install -r requirements-dev.txt` gives a developer the same closure the
+# launchd jobs run on rather than a fresh resolve of it.
+-r requirements.lock
 pytest>=8

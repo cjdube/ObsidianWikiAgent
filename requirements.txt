@@ -1,2 +1,15 @@
-requests>=2.31
-python-dotenv>=1.0
+# What we import directly, and why each version is held. This file states
+# intent; it is NOT what you install from — `pip install -r requirements.lock`
+# is, because these pins leave everything *underneath* them free to float.
+# `requests>=2.31` was all this file said until 2026-09-01, so every rebuild of
+# the venv picked up whatever was current that day, on a repo whose ingest runs
+# unattended against a live vault. Same versions LocalLLMAgent holds; the two
+# repos share a machine and an Ollama host, so they should not disagree.
+#
+# To bump: change a pin here, regenerate requirements.lock (steps in its
+# header), reinstall, run the tests, then commit both.
+
+# Every HTTP call in the repo: Ollama, Gemini, and the ntfy failure push.
+requests==2.34.2
+# agent/__init__.py reads config/.env with this, once, for all four entrypoints.
+python-dotenv==1.2.2

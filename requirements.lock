@@ -1,0 +1,35 @@
+# Generated lock file — the full dependency closure, exact versions.
+# DO NOT hand-edit. Declare intent in requirements.txt; regenerate this from it.
+#
+# Install from this file. requirements.txt pins only the two packages we import
+# directly, which leaves everything underneath them free to float. That is not
+# hypothetical here: on 2026-09-01, the day this file was first written, a fresh
+# resolve of the very same requirements.txt produced certifi 2026.7.22,
+# charset-normalizer 3.5.1 and idna 3.19, while the .venv the nightly ingest had
+# been running on held 2026.6.17, 3.4.7 and 3.18. Three silent transitive moves,
+# on a job that writes to a live vault unattended. The versions below are the
+# tested ones the ingest actually ran on, not that fresh resolve.
+#
+# Runtime only. Dev tooling stays unpinned in requirements-dev.txt: pytest
+# breaking costs an afternoon, a broken scheduled ingest costs a day of vault
+# writes.
+#
+# To bump a dependency:
+#   1. edit the pin in requirements.txt
+#   2. python3.12 -m venv /tmp/lockenv && /tmp/lockenv/bin/pip install \
+#        -r requirements.txt -c requirements.lock
+#      The `-c` is not optional. Without it a fresh resolve re-floats every
+#      transitive — see the three above. Constraining against this file holds
+#      them and lets only genuinely-new packages resolve. To deliberately bump
+#      one, drop its line from the constraints first.
+#   3. /tmp/lockenv/bin/pip freeze > requirements.lock   (keep this header)
+#   4. .venv/bin/pip install -r requirements.lock -r requirements-dev.txt
+#   5. run .venv/bin/pytest, then a real ingest against a disposable vault copy
+#      — the suite mocks every HTTP call, so transitive breakage in requests
+#      reaches the ingest before it reaches a test.
+certifi==2026.6.17
+charset-normalizer==3.4.7
+idna==3.18
+python-dotenv==1.2.2
+requests==2.34.2
+urllib3==2.7.0
