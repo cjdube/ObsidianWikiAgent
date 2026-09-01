@@ -395,28 +395,41 @@ Once a vault is set up and scheduled, this is the actual workflow:
 ## Adding a new vault
 
 1. Create the vault folder with `RULES.md`, `raw/`, `wiki/`.
-2. Copy `launchd/template.plist.txt` to a new
-   `launchd/local.wikiagent.<vault-name>-ingest.plist`, filling in
-   the placeholders (repo path, `--vault` path, `Label`, log filename).
-   Concrete `.plist` files are gitignored — they stay local to your machine,
-   so there is nothing to commit.
-3. Validate it before loading — a plist with stray text (e.g. anything
-   before the `<?xml ...?>` declaration) parses fine as a copy but fails
-   `launchctl load` with an opaque `Input/output error`:
+2. Install its scheduled jobs:
    ```bash
-   plutil -lint launchd/local.wikiagent.<vault-name>-ingest.plist
+   ./launchd/install.sh ~/Vaults/<vault-name>
    ```
-4. Copy it into `~/Library/LaunchAgents/` — note the `~`. That's your
-   per-user LaunchAgents directory; `/Library/LaunchAgents` (no `~`) is a
-   different, root-owned system directory, and `cp` there fails with
-   `Permission denied`. Then load it:
+   The script derives every placeholder from the vault path, checks the result
+   with `plutil -lint`, copies it into `~/Library/LaunchAgents/`, and
+   bootstraps it. Re-running it is safe. Two flags: `--dry-run` prints the
+   generated plists instead of installing them, and `--name` sets a job label
+   other than the vault folder's own name.
+3. Confirm they loaded:
    ```bash
-   cp launchd/local.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
-   launchctl load ~/Library/LaunchAgents/local.wikiagent.<vault-name>-ingest.plist
+   launchctl list | grep wikiagent
    ```
-5. Optionally, if the vault has a git remote, repeat steps 2–4 with
-   `launchd/template-snapshot.plist.txt` for a `<vault-name>-snapshot` job
-   that commits and pushes the vault daily.
+
+It installs the `ingest` and `snapshot` jobs by default. The snapshot job
+commits and pushes the vault daily, so it only does anything useful if the
+vault has a git remote. Name the jobs explicitly to add the weekly lint:
+
+```bash
+./launchd/install.sh ~/Vaults/<vault-name> ingest lint snapshot
+```
+
+`lint` is opt-in rather than default because it is the one job whose template
+sets `LLM_PROVIDER=gemini`, so the pages it reads leave the machine.
+
+Nothing runs at install time — every template ships `RunAtLoad` false, so the
+first run is on schedule. To fire one now:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/local.wikiagent.<vault-name>-ingest
+```
+
+The generated `.plist` files land beside the templates in `launchd/` and are
+gitignored: a real one names a personal vault path, so it stays on your
+machine and there is nothing to commit.
 
 No Python changes required — this is the whole point of the vault-path
 parameterization in `agent/wiki_tools.py`.
@@ -433,25 +446,31 @@ your terminal works, because the terminal has its own grant. Keep the
 
 ## Scheduling — launchd
 
-Each vault has its own `.plist` in `launchd/`, copied to
-`~/Library/LaunchAgents/` and loaded with `launchctl load`. Same convention
-as `LocalLLMAgent`.
+Each vault's jobs are installed by `./launchd/install.sh` — see
+[Adding a new vault](#adding-a-new-vault). It writes the real `.plist` into
+`launchd/` and into `~/Library/LaunchAgents/`, then bootstraps it. Re-running
+it is safe: an already-loaded job is booted out first, so the same command
+installs and reloads.
 
 ```bash
 # check status
 launchctl print gui/$(id -u)/local.wikiagent.<vault-name>-ingest
 
 # trigger on demand (bypasses the schedule, useful for testing)
-launchctl start local.wikiagent.<vault-name>-ingest
+launchctl kickstart -k gui/$(id -u)/local.wikiagent.<vault-name>-ingest
 
-# reload after editing a .plist
-launchctl unload ~/Library/LaunchAgents/local.wikiagent.<vault-name>-ingest.plist
-cp launchd/local.wikiagent.<vault-name>-ingest.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/local.wikiagent.<vault-name>-ingest.plist
+# reload after editing a template
+./launchd/install.sh ~/Vaults/<vault-name>
+
+# after a Python upgrade — see below
+./launchd/reload-after-upgrade.sh
 ```
 
-Logs land in `logs/wiki_ingest.<vault-name>.log` (structured, written by
+Logs land in `logs/wiki_ingest.<vault-basename>.log` (structured, written by
 the script) and `logs/<vault-name>-ingest.launchd.log` (raw stdout/stderr).
+The first is named after the vault directory's own last path component,
+because that is what `setup_logger` uses; the second after the job label.
+They match unless you passed `--name`.
 
 Both are capped. The structured log rotates at 5 MB, keeping three backups.
 The launchd log can't rotate — launchd opens it when the job starts and the
@@ -461,6 +480,25 @@ in place at startup, keeping the last 1 MB once it passes 5 MB. That needs the
 script to know which file launchd chose, which is why the `.plist` repeats the
 path in `EnvironmentVariables` as `WIKI_LAUNCHD_LOG`; if you leave it out,
 nothing breaks and nothing gets trimmed.
+
+### After `brew upgrade python@3.12`
+
+An upgrade replaces the interpreter `.venv/bin/python` resolves to, and launchd
+still holds the code signature it recorded when the job was loaded. It then
+refuses to exec the replacement: the job dies at launch with
+`OS_REASON_CODESIGNING`, before any of our code runs, so nothing is logged and
+no failure push goes out. The job simply appears not to have run.
+
+`./launchd/reload-after-upgrade.sh` is the fix. It compares the interpreter
+against the fingerprint in `config/.interpreter_id`, reloads every job that
+execs it, and re-records the fingerprint. `--check` reports and changes
+nothing; `--quiet` says nothing unless it acts. A job that is currently running
+is skipped, because an ingest routinely takes one to three hours and bouncing
+it would throw that away.
+
+The same upgrade can also revoke the TCC folder grant, which is keyed to the
+interpreter's exact path — see the note above. The script does not fix that
+half; only re-granting does.
 
 ## When a run goes wrong
 

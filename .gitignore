@@ -1,6 +1,10 @@
 .venv/
 __pycache__/
 config/.env
+# Written by launchd/reload-after-upgrade.sh: the identity of the interpreter
+# the jobs exec, so a brew upgrade that swaps it is caught before a run dies on
+# it rather than after. Per-machine by definition.
+config/.interpreter_id
 # The trailing * matters: RotatingFileHandler names its backups .log.1, .log.2,
 # which `logs/*.log` does not match. Those backups hold every tool call's full
 # JSON result — i.e. verbatim raw-source and wiki-page content — so leaving them

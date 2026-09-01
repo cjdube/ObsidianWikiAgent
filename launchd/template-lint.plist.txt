@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Reference template for a vault's weekly audit job. Not itself loaded by
+     launchd — launchd/install.sh fills in the placeholders and writes the real
+     <label>.plist (concrete .plist files are gitignored, so they stay local to
+     your machine).
+
+     Optional: the audit is worth scheduling once a vault is big enough that
+     reading every page by hand stopped being realistic. Until then, run
+     wiki_lint.py when you feel like it.
+
+     This job passes no fix flag, so it only reads the vault — safe to run
+     unattended, and the report lands in the log for a human to act on.
+     (wiki_lint.py can write, but only under that flag, and only the two
+     mechanical fixes; see its module docstring.)
+
+     The flag is spelled with two dashes, but this comment cannot say so
+     literally: XML forbids a double dash inside a comment. plutil and launchd
+     accept it anyway, so the only thing that breaks is a strict XML parser —
+     LocalLLMAgent's dashboard reader dropped a job's row until it was reworded.
+
+     Runs Sunday at 10:00, after that morning's 09:00 ingest, so it audits a
+     full week of new pages.
+
+     Placeholders install.sh replaces:
+       <ABSOLUTE_PATH_TO_REPO>  where you cloned this repo
+       <VAULT_NAME>             short name for the vault (e.g. learnings)
+       <ABSOLUTE_PATH_TO_VAULT> the vault directory the job is pointed at
+       <VAULT_BASENAME>         the LAST PATH COMPONENT of that vault directory
+
+     The last two are usually different, and the difference is why WREN_RUN_LOG
+     used to name a file that never existed: VAULT_NAME is a short label you
+     pick, while setup_logger names the structured log after the vault
+     directory's own basename. install.sh derives both, so run it rather than
+     filling these in by hand. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.wikiagent.<VAULT_NAME>-lint</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string><ABSOLUTE_PATH_TO_REPO>/.venv/bin/python</string>
+        <string><ABSOLUTE_PATH_TO_REPO>/wiki_lint.py</string>
+        <string>--vault</string>
+        <string><ABSOLUTE_PATH_TO_VAULT></string>
+        <string>--deep</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string><ABSOLUTE_PATH_TO_REPO></string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string><ABSOLUTE_PATH_TO_REPO>/logs/<VAULT_NAME>-lint.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string><ABSOLUTE_PATH_TO_REPO>/logs/<VAULT_NAME>-lint.launchd.log</string>
+
+    <!-- LLM_PROVIDER: the deep pass is the one job where model quality decides
+         whether the findings are worth reading, and it runs once a week — so
+         this is the sensible place to spend a cloud call, while the daily
+         ingests keep the local ollama default by setting nothing. Sending a
+         vault's pages to Gemini is a privacy decision (see SECURITY.md); drop
+         the key to audit locally instead. GEMINI_API_KEY comes from config/.env
+         via load_dotenv, never from this file.
+
+         WIKI_LAUNCHD_LOG: same path as StandardOutPath above, so the script can
+         cap the file it is writing to. launchd owns that descriptor and nothing
+         rotates it otherwise. Must match those two paths exactly.
+
+         WREN_RUN_LOG: optional, and only useful if you also run LocalLLMAgent —
+         its dashboard reads run history from the STRUCTURED log named here,
+         which setup_logger names after the script and vault, not after
+         StandardOutPath. Drop the key if you don't run it. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LLM_PROVIDER</key>
+        <string>gemini</string>
+        <key>WIKI_LAUNCHD_LOG</key>
+        <string><ABSOLUTE_PATH_TO_REPO>/logs/<VAULT_NAME>-lint.launchd.log</string>
+        <key>WREN_RUN_LOG</key>
+        <string><ABSOLUTE_PATH_TO_REPO>/logs/wiki_lint.<VAULT_BASENAME>.log</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
