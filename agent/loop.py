@@ -25,7 +25,7 @@ from typing import Callable, Optional
 
 import requests
 
-from agent import budget
+from agent import budget, usage_ledger
 
 MAX_TOOL_ITERATIONS = 6
 
@@ -371,6 +371,102 @@ def _post_with_retry(
     raise RuntimeError("unreachable")
 
 
+def _task_name(logger: Optional[logging.Logger]) -> str:
+    """What the ledger records a call as having been for.
+
+    setup_logger names each entrypoint's logger after the job and vault
+    (wiki_ingest.<vault>, wiki_lint.<vault>), so the logger already carries the
+    attribution. A call made with no logger at all has none to carry, and
+    "agent.loop" would be a column that says only which file made the request.
+
+    getattr rather than .name: the loop accepts anything logger-shaped, and the
+    suite passes recorders that implement the four level methods and nothing
+    else. A ledger field is not worth failing a run over.
+    """
+    return getattr(logger, "name", None) or "unknown"
+
+
+def _usage_from(data: dict, backend: str) -> dict:
+    """Token counts out of one response body, per provider.
+
+    Gemini here is the REST endpoint, not the Python SDK: the JSON is
+    camelCase and the SDK's snake_case attribute names match nothing. Reading
+    them would produce a ledger of nulls that looks like a quiet provider
+    rather than a bug, which is why tests/test_usage_ledger.py asserts the
+    snake_case shape yields nulls.
+    """
+    if backend == "gemini":
+        usage = data.get("usageMetadata") or {}
+        candidates = data.get("candidates") or []
+        return {
+            "prompt_tokens": usage.get("promptTokenCount"),
+            "output_tokens": usage.get("candidatesTokenCount"),
+            "thinking_tokens": usage.get("thoughtsTokenCount"),
+            "finish_reason": candidates[0].get("finishReason") if candidates else None,
+        }
+    return {
+        "prompt_tokens": data.get("prompt_eval_count"),
+        # eval_count comes back on every non-streaming response for free and
+        # this repo had never read it — output size was logged nowhere at all.
+        "output_tokens": data.get("eval_count"),
+        "thinking_tokens": None,
+        "finish_reason": data.get("done_reason"),
+    }
+
+
+def _post_and_record(
+    url: str,
+    payload: dict,
+    *,
+    backend: str,
+    model: str,
+    caller: str,
+    timeout: int,
+    headers: Optional[dict] = None,
+    logger: Optional[logging.Logger] = None,
+    num_ctx: Optional[int] = None,
+    tools_offered: int = 0,
+) -> dict:
+    """POST one model call, append its usage row, return the parsed body.
+
+    Not a true seam — the four call sites still branch on provider before they
+    get here — but it is the one place the response-to-row mapping lives, and
+    that mapping is what rots when a fifth call site appears.
+
+    One row per call, so a 30-iteration ingest writes 30 rows. Collapsing them
+    into one per run would hide the growth the ledger exists to show: the
+    prompt is re-sent in full every iteration.
+    """
+    t0 = time.monotonic()
+    common_fields = {
+        "task": _task_name(logger),
+        "caller": caller,
+        "backend": backend,
+        "model": model,
+        "num_ctx": num_ctx,
+        "tools_offered": tools_offered,
+    }
+    try:
+        resp = _post_with_retry(
+            url, payload, headers=headers, timeout=timeout, logger=logger
+        )
+        data = resp.json()
+    except Exception as e:
+        usage_ledger.record(
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            ok=False,
+            error=f"{e.__class__.__name__}: {e}",
+            **common_fields,
+        )
+        raise
+    usage_ledger.record(
+        duration_ms=int((time.monotonic() - t0) * 1000),
+        **_usage_from(data, backend),
+        **common_fields,
+    )
+    return data
+
+
 def run_agent(
     system_prompt: str,
     user_prompt: str,
@@ -616,13 +712,17 @@ def _run_ollama(
         payload["think"] = think
 
     for iteration in range(max_iterations):
-        resp = _post_with_retry(
+        data = _post_and_record(
             f"{host}/api/chat",
             {**payload, "messages": messages},
+            backend="ollama",
+            model=model,
+            caller="run",
             timeout=timeout,
             logger=logger,
+            num_ctx=options["num_ctx"],
+            tools_offered=len(tools),
         )
-        data = resp.json()
         _log_prompt_size(data, iteration + 1, options["num_ctx"], logger)
         _warn_if_reply_hit_the_cap(data, logger)
         message = data["message"]
@@ -729,14 +829,17 @@ def _run_gemini(
     contents = [{"role": "user", "parts": [{"text": user_prompt}]}]
 
     for iteration in range(max_iterations):
-        resp = _post_with_retry(
+        data = _post_and_record(
             url,
             {**payload_base, "contents": contents},
+            backend="gemini",
+            model=model,
+            caller="run",
             headers=headers,
             timeout=_gemini_timeout(),
             logger=logger,
+            tools_offered=len(tools),
         )
-        data = resp.json()
 
         candidates = data.get("candidates") or []
         if not candidates:
@@ -794,26 +897,35 @@ def complete_text(
     model: str = None,
     host: str = None,
     provider: str = None,
+    logger: Optional[logging.Logger] = None,
 ) -> str:
     """Single-turn, tool-free completion — for tasks where the caller
     assembles the surrounding structure itself rather than trusting the
-    model to produce it."""
+    model to produce it.
+
+    logger is optional but worth passing: it names the task in the usage
+    ledger, and it is what lets _post_with_retry say that it is backing off.
+    Without it a one-shot call is recorded as task "unknown"."""
     name = _provider(provider)
 
     if name == "gemini":
         # Same validation _run_gemini does. Skipping it here built a URL of
         # 'models/None:generateContent' and returned an opaque 404.
         model = _gemini_model(model)
-        resp = _post_with_retry(
+        data = _post_and_record(
             f"{GEMINI_ENDPOINT}/models/{model}:generateContent",
             {
                 "systemInstruction": {"parts": [{"text": system_prompt}]},
                 "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             },
+            backend="gemini",
+            model=model,
+            caller="complete_text",
             headers={"x-goog-api-key": _gemini_key()},
             timeout=_gemini_timeout(),
+            logger=logger,
         )
-        candidates = resp.json().get("candidates") or []
+        candidates = data.get("candidates") or []
         if not candidates:
             return ""
         parts = (candidates[0].get("content") or {}).get("parts") or []
@@ -821,7 +933,8 @@ def complete_text(
 
     model = _ollama_model(model)
     host = _ollama_host(host)
-    resp = _post_with_retry(
+    options = _ollama_options()
+    data = _post_and_record(
         f"{host}/api/chat",
         {
             "model": model,
@@ -830,14 +943,19 @@ def complete_text(
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
-            "options": _ollama_options(),
+            "options": options,
         },
+        backend="ollama",
+        model=model,
+        caller="complete_text",
         timeout=int(os.getenv("OLLAMA_TIMEOUT", "300")),
+        logger=logger,
+        num_ctx=options["num_ctx"],
     )
-    data = resp.json()
-    # No logger is passed in here, so use the module's — a truncated
-    # single-turn answer is exactly as silent as a truncated loop turn.
-    _warn_if_reply_hit_the_cap(data, logging.getLogger(__name__))
+    # Fall back to the module's logger when the caller passed none — a
+    # truncated single-turn answer is exactly as silent as a truncated loop
+    # turn, and this warning predates the parameter.
+    _warn_if_reply_hit_the_cap(data, logger or logging.getLogger(__name__))
     return data["message"].get("content", "").strip()
 
 

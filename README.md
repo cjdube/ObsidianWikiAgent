@@ -149,6 +149,19 @@ loop generates until the client times out — one such call cost a whole 45-minu
 run. A reply that stops at the cap logs a warning, so truncation is never
 silent either.
 
+Every call either provider makes also appends one JSON line to
+`logs/usage.jsonl` (`agent/usage_ledger.py`) — timestamp, task, backend,
+model, prompt/output/thinking tokens, `num_ctx`, duration, finish reason, and
+an estimated cost that is `0.0` for Ollama and `null`, never `0.0`, for a
+Gemini model missing from the price table. One row per loop iteration, not per
+run: a 30-iteration ingest really is 30 prompts, each bigger than the last.
+
+Nothing in this repo reads that file, and nothing here should: it is written
+here and read by a tool outside this repo, so the field names are a contract.
+Writes are flock'd (several launchd jobs can overlap), never raise, and prune
+themselves — see `WIKI_USAGE_MAX_BYTES` and `WIKI_USAGE_RETENTION_DAYS` in
+`config/.env.example`.
+
 ### `agent/wiki_tools.py`
 
 Vault-path-parameterized file I/O against `raw/` and `wiki/` — every
@@ -556,4 +569,9 @@ That one command is enough: `requirements-dev.txt` includes the lock.
   when `LLM_PROVIDER=gemini` is set for that run (see the top of this file).
 - `config/.env` and `logs/*.log*` are gitignored — the trailing `*` covers the
   rotated `.log.1` backups, which contain clipped tool-call arguments and
-  results and may still hold excerpts of vault content.
+  results and may still hold excerpts of vault content. `logs/usage.jsonl*`
+  needs its own rule: token counts are not vault content, but a file appended
+  to on every model call has no business in the history either.
+- No "what have I spent" command. The usage ledger is written here and read
+  outside this repo; a reader on this side would be a second answer to the
+  same question, free to disagree with the first.

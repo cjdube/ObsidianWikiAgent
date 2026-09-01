@@ -10,6 +10,10 @@ config/.interpreter_id
 # JSON result — i.e. verbatim raw-source and wiki-page content — so leaving them
 # trackable puts private vault content one `git add -A` away from a commit.
 logs/*.log*
+# The usage ledger and its lock/rewrite siblings. `logs/*.log*` above does not
+# match a .jsonl, and this file is appended to on every single model call —
+# so it would be the one thing in logs/ that a `git add -A` picks up.
+logs/usage.jsonl*
 .DS_Store
 
 # Personal launchd jobs — concrete paths/labels stay local. Copy

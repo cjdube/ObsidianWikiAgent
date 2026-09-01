@@ -499,7 +499,9 @@ def _load_rules(vault_path: str) -> str:
     return rules_path.read_text(encoding="utf-8")
 
 
-def _classify_raw_file(filename: str, content: str, folders: list[dict]) -> str | None:
+def _classify_raw_file(
+    filename: str, content: str, folders: list[dict], logger=None
+) -> str | None:
     """Ask the local model which declared folder a file belongs in, returning
     the matched folder name (as declared) or None if the reply matches none."""
     folder_lines = "\n".join(f"- {f['name']}: {f['description']}" for f in folders)
@@ -508,7 +510,9 @@ def _classify_raw_file(filename: str, content: str, folders: list[dict]) -> str 
         f"Filename: {filename}\n\n"
         f"Content (may be truncated):\n{content[:2000]}"
     )
-    reply = complete_text(system_prompt=system, user_prompt=user).strip().lower()
+    reply = complete_text(
+        system_prompt=system, user_prompt=user, logger=logger
+    ).strip().lower()
     by_lower = {f["name"].lower(): f["name"] for f in folders}
 
     if reply in by_lower:
@@ -549,7 +553,7 @@ def sort_raw_files(vault_path: str, logger) -> None:
         budget.start_source(f"sort of {filename}", MAX_RETRIES_PER_SOURCE)
         content = read_raw_file(vault_path, filename).get("content", "")
         try:
-            choice = _classify_raw_file(filename, content, folders)
+            choice = _classify_raw_file(filename, content, folders, logger)
         except budget.BudgetExceeded:
             # Never demoted to "couldn't classify this one" — the run is over.
             raise
