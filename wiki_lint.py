@@ -53,6 +53,7 @@ from agent.notify import notify_failure
 from agent.wiki_tools import (
     QUERY_TOOL_SCHEMAS,
     RawScan,
+    UNFILED_HEADING,
     atomic_write,
     get_ingested_sources,
     list_wiki_pages,
@@ -163,10 +164,36 @@ def check_orphans(pages: dict[str, str]) -> list[str]:
     ]
 
 
+def _unfiled_entries(content: str) -> set[str]:
+    """Page names listed under the index's Unfiled heading."""
+    names, inside = set(), False
+    for line in content.splitlines():
+        if line.strip() == UNFILED_HEADING:
+            inside = True
+            continue
+        if inside and line.startswith("## "):
+            break
+        if inside:
+            names |= linked_page_names(line)
+    return names
+
+
 def check_index(vault_path: str, pages: dict[str, str]) -> list[str]:
-    """Index completeness in both directions. update_index guarantees every
-    page is listed, but it never prunes links to pages that were deleted."""
-    linked = linked_page_names(read_index(vault_path)["content"])
+    """Index completeness in both directions, plus the Unfiled backlog.
+
+    update_index guarantees every page is listed, but it never prunes links to
+    pages that were deleted.
+
+    Unfiled is counted here because nothing else watches it. _normalize_index
+    recomputes that heading on every update_index call, so deleting a section
+    heading by hand silently drops its pages there; the ingest's own warning
+    (see _file_planned_page in wiki_ingest.py) only covers pages that one run
+    wrote. Zero is the baseline — the vault has had no Unfiled heading since
+    2026-08-31 — so any count at all is drift, and one finding reports the
+    whole backlog rather than one per page.
+    """
+    content = read_index(vault_path)["content"]
+    linked = linked_page_names(content)
     findings = [
         f"{slug}.md is not linked from index.md — update_index should have "
         f"caught this; check it ran."
@@ -177,6 +204,17 @@ def check_index(vault_path: str, pages: dict[str, str]) -> list[str]:
         f"deleted and the index entry left behind; remove the entry."
         for name in sorted(linked - set(pages))
     ]
+    if unfiled := _unfiled_entries(content):
+        shown = sorted(unfiled)
+        listed = ", ".join(shown[:5])
+        if len(shown) > 5:
+            listed += f", and {len(shown) - 5} more"
+        findings.append(
+            f"{len(shown)} page(s) sit under the index's Unfiled heading "
+            f"({listed}). File each under a real section, and check why they "
+            f"landed there — a section heading removed by hand, or an ingest "
+            f"that planned pages without one."
+        )
     return findings
 
 

@@ -95,6 +95,41 @@ def test_check_index_clean(vault):
     assert wl.check_index(vault.path, wl._pages(vault.path)) == []
 
 
+def test_check_index_reports_the_unfiled_backlog_as_one_finding(vault):
+    """The hand-edit shape: a section heading is deleted, and _normalize_index
+    silently recomputes its pages under Unfiled on the next update_index."""
+    for slug in ("a", "b"):
+        vault.page(slug, good_page())
+    vault.index("# Index\n\n## Unfiled\n\n- [[a]] x\n- [[b]] y\n")
+    findings = wl.check_index(vault.path, wl._pages(vault.path))
+    assert len(findings) == 1
+    assert findings[0].startswith("2 page(s) sit under the index's Unfiled heading (a, b)")
+
+
+def test_check_index_truncates_a_long_unfiled_backlog(vault):
+    slugs = [f"p{i}" for i in range(7)]
+    for slug in slugs:
+        vault.page(slug, good_page())
+    entries = "".join(f"- [[{slug}]] x\n" for slug in slugs)
+    vault.index(f"# Index\n\n## Unfiled\n\n{entries}")
+    findings = wl.check_index(vault.path, wl._pages(vault.path))
+    assert len(findings) == 1
+    assert "(p0, p1, p2, p3, p4, and 2 more)" in findings[0]
+
+
+def test_check_index_stops_counting_at_the_next_heading(vault):
+    """Unfiled is not always last: a later heading ends it, and its pages are
+    filed, not part of the backlog."""
+    for slug in ("stray", "filed"):
+        vault.page(slug, good_page())
+    vault.index(
+        "# Index\n\n## Unfiled\n\n- [[stray]] x\n\n## Tools\n\n- [[filed]] y\n"
+    )
+    findings = wl.check_index(vault.path, wl._pages(vault.path))
+    assert len(findings) == 1
+    assert findings[0].startswith("1 page(s) sit under the index's Unfiled heading (stray)")
+
+
 # --- check_source_coverage -------------------------------------------------
 
 
