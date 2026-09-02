@@ -269,12 +269,22 @@ def test_the_prune_keeps_recent_rows_and_drops_old_ones(monkeypatch):
 
 def test_the_suite_never_writes_the_real_ledger(monkeypatch):
     """tests/conftest.py redirects agent.common.LOGS_DIR, and ledger_path()
-    resolves against it per call rather than binding it at import."""
+    resolves against it per call rather than binding it at import.
+
+    What this asserts is that the call left the real ledger untouched, not that
+    the file is absent. logs/usage.jsonl is production data on any machine that
+    actually runs the agent — the scheduled ingest appends to it — so the
+    absence form passed only on a checkout that had never run one, and started
+    failing here on 2026-09-02. Size is enough: an appended row always grows it.
+    """
     from agent import common
+
+    real = common._ROOT / "logs" / "usage.jsonl"
+    before = real.stat().st_size if real.exists() else None
 
     replies(monkeypatch, {"message": {"content": "ok"}})
     loop.complete_text("sys", "user", provider="ollama")
 
     assert usage_ledger.ledger_path().exists()
     assert usage_ledger.ledger_path().parent == common.LOGS_DIR
-    assert not (common._ROOT / "logs" / "usage.jsonl").exists()
+    assert (real.stat().st_size if real.exists() else None) == before
