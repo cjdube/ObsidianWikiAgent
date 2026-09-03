@@ -398,6 +398,14 @@ def _execute_dispatch(
     already assumes. This makes it true.
     """
     def _counted(fn):
+        # functools.wraps for the signature, not the name: _dispatch_tool drops
+        # kwargs the tool does not declare, and skips that entirely for anything
+        # taking **kwargs. Every wrapper here does, so the guard against a
+        # hallucinated argument was off for the whole of stages 2 and 3 — the
+        # only tools it still covered were the unwrapped ones that never needed
+        # it. wraps sets __wrapped__, which inspect.signature follows, so the
+        # filter sees the real tool's parameters again.
+        @functools.wraps(fn)
         def call(**kwargs):
             result = fn(**kwargs)
             # Only a call that landed counts. A refused reserved name comes back
@@ -422,6 +430,7 @@ def _execute_dispatch(
         An omitted name is not a mismatch. There is exactly one page this step
         can be talking about, so filling it in beats spending an iteration.
         """
+        @functools.wraps(fn)
         def call(**kwargs):
             # Read the page name out of whichever argument this tool spells it
             # with. Naming it in the signature only ever guarded the tools that
@@ -481,6 +490,7 @@ def _log_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
     """
     append = functools.partial(append_log, vault_path)
 
+    @functools.wraps(append)
     def _tracked_append_log(**kwargs):
         result = append(**kwargs)
         # Count the call that landed, not the call that was attempted, exactly

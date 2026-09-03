@@ -206,6 +206,34 @@ def test_log_counter_ignores_a_failed_append(vault):
     assert writes
 
 
+def test_stage_wrappers_keep_the_hallucinated_kwarg_filter_working(vault):
+    """_dispatch_tool drops an argument the tool never declared, but skips that
+    for any callable taking **kwargs — and every wrapper in stages 2 and 3 does.
+    The guard was therefore off for exactly the tools it was written for,
+    including update_index handed a 'name', the case its own comment cites.
+    The wrappers carry functools.wraps so inspect.signature sees the real
+    tool again; this holds them to it."""
+    vault.page("real", "# Real\n\n**Sources**: a.md\n**Last updated**: 2026-01-01\n")
+    execute = wiki_ingest._execute_dispatch(
+        vault.path, "src.md", "real", wiki_ingest._WriteCounter(), exists=True
+    )
+
+    assert "edited" in loop._dispatch_tool(
+        "edit_wiki_page",
+        {"name": "real", "section": "Notes", "content": "- fact\n",
+         "content_type": "markdown"},
+        execute, None,
+    )
+    assert "filed" in loop._dispatch_tool(
+        "update_index", {"page": "real", "section": "S", "name": "real"}, execute, None
+    )
+
+    logs = wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter())
+    assert "appended" in loop._dispatch_tool(
+        "append_log", {"entry": "- ingested src.md", "date": "2026-09-03"}, logs, None
+    )
+
+
 def test_the_source_filename_is_not_the_models_to_supply(vault):
     """RULES.md has a paragraph of rules about citing a source correctly — bare
     filename, no directory prefix — and the sort step files sources into
