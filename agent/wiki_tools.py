@@ -42,9 +42,11 @@ from agent.wikilinks import (
 
 
 # The two files in wiki/ that Python owns rather than the model. Both are
-# reachable by name through write_wiki_page — _safe_page_path only checks the
-# path stays inside wiki/, and these are inside it — so naming them here is
-# what keeps them out of that tool's reach. See write_wiki_page.
+# reachable by name through write_wiki_page and read_wiki_page — _safe_page_path
+# only checks the path stays inside wiki/, and these are inside it — so naming
+# them here is what keeps them out of both tools' reach. See write_wiki_page for
+# the guarantees the write side protects, and read_wiki_page for the context
+# bound the read side protects.
 RESERVED = ("index.md", "log.md")
 
 
@@ -511,10 +513,38 @@ def search_wiki_pages(vault_path: str, query: str, limit: int = 40) -> dict:
 
 
 def read_wiki_page(vault_path: str, name: str) -> dict:
+    """The current content of one wiki page.
+
+    index.md and log.md are refused (see RESERVED), for the read side of the
+    reason write_wiki_page refuses them. Both live inside wiki/, so
+    _safe_page_path admits them, and QUERY_TOOL_SCHEMAS deliberately offers no
+    read_index — but naming the file here reached it anyway, which made this
+    the back door through the bound QUERY_TOOL_SCHEMAS exists to enforce. The
+    2026-08-30 deep lint opened index.md as its first call and spent 82 KB, a
+    fifth of a 65,536-token window, on a table of contents; wiki_lint.py's
+    prompt was meanwhile telling the model no such tool existed.
+
+    The point is the bound, not the file: a tool result sized by the vault
+    rather than by the question breaks as the vault grows, and both of these
+    grow with it forever. search_wiki_pages answers "what exists about X" in a
+    fixed number of rows, and list_index_sections answers "which section" in a
+    few dozen.
+    """
     try:
         path = _safe_page_path(vault_path, name)
     except ValueError as e:
         return {"error": str(e)}
+    if path.name in RESERVED:
+        # The write-path refusal names its replacement tool, and this one
+        # deliberately does not: read_wiki_page appears in three schema sets
+        # that share no other tool, so any name given here is an unknown-tool
+        # error in two of them. Say what the file is instead, which is true
+        # everywhere and is the part that stops the retry.
+        return {
+            "error": f"'{path.name}' is not a wiki page — it is a whole-vault "
+                     f"file that Python maintains, and it grows with the "
+                     f"vault. Read the pages themselves."
+        }
     if not path.is_file():
         return {"error": f"wiki page '{name}' not found"}
     return {"content": path.read_text(encoding="utf-8")}
@@ -1494,6 +1524,11 @@ LOG_TOOL_SCHEMAS = [
 # wiki_query.py and wiki_lint.py must therefore name search, not the index: they
 # told the model to read wiki/index.md for a while after the tool was gone,
 # which cost an unknown-tool error and an iteration every run.
+#
+# Withholding read_index is not on its own enough, because read_wiki_page took
+# the same file by name — see its RESERVED refusal, which is what actually
+# closes this dispatch. Any tool added here has to be bounded by the answer;
+# one sized by the vault reopens the hole however it is spelled.
 QUERY_TOOL_SCHEMAS = [
     SEARCH_WIKI_PAGES_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,

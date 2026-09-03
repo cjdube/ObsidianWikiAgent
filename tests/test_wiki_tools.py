@@ -1046,6 +1046,35 @@ def test_read_wiki_page_rejects_a_nested_name(vault):
     assert "nest" in wt.read_wiki_page(vault.path, "topics/foo")["error"]
 
 
+def test_read_wiki_page_refuses_the_index_and_says_why(vault):
+    """QUERY_TOOL_SCHEMAS offers no read_index on purpose, but naming the file
+    reached it anyway — the 2026-08-30 deep lint opened index.md first and
+    spent 82 KB of its window on a table of contents. The refusal says what the
+    file is, because a model told only "no" retries the same call."""
+    vault.index("# Index\n\n- [[colima]] A container runtime.\n")
+
+    result = wt.read_wiki_page(vault.path, "index")
+
+    assert "content" not in result
+    assert "index.md" in result["error"]
+    assert "not a wiki page" in result["error"]
+
+
+def test_read_wiki_page_refuses_the_log_in_any_case(vault):
+    """log.md is the other file that grows with the vault forever, and RESERVED
+    is compared after lower-casing, so the capitalised spelling is refused too."""
+    (vault.root / "wiki" / "log.md").write_text("## 2026-08-30\n\n- one line.\n")
+
+    assert "content" not in wt.read_wiki_page(vault.path, "Log.md")
+
+
+def test_read_wiki_page_still_reads_an_ordinary_page(vault):
+    """The guard is two filenames, not a new restriction on reading."""
+    vault.page("colima", "# Colima\n\nThe real page.\n")
+
+    assert "The real page." in wt.read_wiki_page(vault.path, "colima")["content"]
+
+
 def test_safe_page_path_allows_a_name_that_resolves_back_to_flat(vault):
     """'sub/../foo' names wiki/foo.md, which is where pages go."""
     assert wt._safe_page_path(vault.path, "sub/../foo").name == "foo.md"
