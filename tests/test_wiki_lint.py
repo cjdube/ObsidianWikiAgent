@@ -748,6 +748,25 @@ def test_main_pushes_an_alert_when_the_run_crashes(vault, monkeypatch):
     assert "disk" in pushed[0][1]
 
 
+def test_deep_pass_gives_the_judgment_agent_its_full_iteration_allowance(vault, monkeypatch):
+    """A literal here regressed once already: at 60 the pass ran out of tool
+    calls and returned [incomplete] instead of a report, so the allowance is a
+    named constant and this asserts the agent actually receives it."""
+    seen = {}
+    vault.page("a", good_page())
+    vault.index("# Index\n\n- [[a]] s.\n")
+
+    def _capture(**kw):
+        seen.update(kw)
+        return "no findings"
+
+    monkeypatch.setattr(wl, "run_agent", _capture)
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+    wl.main()
+
+    assert seen["max_iterations"] == wl.MAX_DEEP_ITERATIONS > 60
+
+
 def test_main_starts_a_budget_only_for_the_deep_pass(vault, monkeypatch):
     """The structural pass is local Python and consults no budget, so starting
     one for it would bound nothing. --deep is the pass that can hang."""

@@ -72,12 +72,21 @@ from agent.wikilinks import (
 )
 
 # Bounds for the --deep pass only. This is a scheduled unattended job against a
-# provider that can be slow or down, and 60 iterations x 5 HTTP attempts is the
+# provider that can be slow or down, and 120 iterations x 5 HTTP attempts is the
 # same unbounded product that had wiki_ingest retrying for three hours. Smaller
 # than the ingest's 45 minutes because this is one conversation, not a queue of
 # sources: the pass normally costs a couple of minutes.
 DEEP_RUN_BUDGET_MINUTES = 30
 MAX_DEEP_RETRIES = 8
+
+# Raised from 60 on 2026-09-03. At 60, three of three measured Gemini passes
+# over a 533-page vault spent the whole allowance searching and returned
+# [incomplete] instead of a report, so the weekly job produced nothing; the
+# local model self-limits around 20-28 calls and was never the binding
+# constraint. At 120 both providers finish, the slowest measured pass was 235s,
+# and DEEP_RUN_BUDGET_MINUTES still stops a wedged run. This bounds sampling
+# effort, not thoroughness: the pass samples the vault, it does not sweep it.
+MAX_DEEP_ITERATIONS = 120
 
 LINT_WRAPPER = """
 
@@ -738,8 +747,8 @@ def _lint(args, rules_path: Path, logger) -> int:
         print("\n---\n\n## Judgment pass\n")
         context = report if count else "The structural pass found no problems."
         dispatch = query_dispatch(args.vault)
-        # The judgment pass is one unit of work for retry-ceiling purposes: 60
-        # iterations x 5 HTTP attempts is up to 300 retries against a provider
+        # The judgment pass is one unit of work for retry-ceiling purposes: 120
+        # iterations x 5 HTTP attempts is up to 600 retries against a provider
         # that may simply be down, and nothing else here bounds that.
         budget.start_source("judgment pass", MAX_DEEP_RETRIES)
         # logger= gives the run a tool-call timeline (`tool_call name(args) ->
@@ -751,7 +760,7 @@ def _lint(args, rules_path: Path, logger) -> int:
             user_prompt="Audit the wiki and report your findings.",
             tools=QUERY_TOOL_SCHEMAS,
             dispatch=dispatch,
-            max_iterations=60,
+            max_iterations=MAX_DEEP_ITERATIONS,
             logger=logger,
         )
         print(judgment)

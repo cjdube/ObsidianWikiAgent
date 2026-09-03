@@ -91,6 +91,24 @@ Measured on 2026-08-21 with an M4 Pro, 48 GB RAM, `gemma4:26b-mlx`, and Ollama 0
 
 Use these as a starting hypothesis, not a current benchmark. Model, Ollama, hardware, or environment changes invalidate them.
 
+### Deep lint provider comparison — Watch
+
+Measured 2026-09-03 on a frozen `git archive` copy of the learnings vault (533 pages, zero structural findings), with four defects planted by hand — one per judgment category the pass claims to cover: a contradiction, a duplicate concept, an out-of-scope page, and an outdated claim. Both new pages were indexed and given inbound links so the structural pass stayed silent and only judgment was scored. Twelve trials, six per provider.
+
+At the then-current cap of 60 iterations:
+
+- Gemini returned `[incomplete]` in three of three runs. Each spent all 60 tool calls searching and produced no report at all.
+- The local `gemma4:26b-mlx` finished three of three, using 20-23 calls and peaking at 52-58 percent of a 65,536-token window.
+
+At a cap of 120, both providers finished every run. Gemini named 4 of 12 planted defects, the local model 2 of 12. Gemini's reports were longer and every spot-checked claim was true. The local model produced one false finding in six runs, and also one true finding the structural pass cannot reach: a corrupted in-text `(source: ...)` citation, which `check_format` does not validate because it only checks the `**Sources**` line.
+
+Two conclusions:
+
+1. The cap, not model quality, was the binding constraint. `MAX_DEEP_ITERATIONS` in [`wiki_lint.py`](../wiki_lint.py) was raised to 120 on the strength of this. Historical production runs used 41-56 of 60, so the headroom was already thin before the vault reached this size; remeasure as it grows.
+2. Neither provider found two of the four defects in any of the twelve runs, including one on a page the local model had opened. The pass samples the vault, it does not sweep it, so a clean judgment report is not evidence that the vault is clean.
+
+The provider itself was not changed. `LLM_PROVIDER=gemini` in the weekly lint plist remains the deliberate privacy opt-in described in [`SECURITY.md`](../SECURITY.md).
+
 ## End-to-end verification
 
 ### Test ingest changes on a fresh vault copy — Active
