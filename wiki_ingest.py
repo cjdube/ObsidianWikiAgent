@@ -479,9 +479,19 @@ def _log_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
     place a call that arrived anyway came back as an unknown-tool error, which
     cost the shortest conversation in the run an iteration out of four.
     """
+    append = functools.partial(append_log, vault_path)
+
     def _tracked_append_log(**kwargs):
-        writes.count += 1
-        return append_log(vault_path, **kwargs)
+        result = append(**kwargs)
+        # Count the call that landed, not the call that was attempted, exactly
+        # as _counted does in stage 2. Counting first made a failed append_log
+        # read as success all the way up: _write_log_entry returns True on the
+        # counter, _ingest_source returns that, and ingest_vault then calls
+        # mark_ingested — so the source was recorded as fully ingested with no
+        # entry in log.md, and no later run would ever retry it.
+        if "error" not in result:
+            writes.count += 1
+        return result
 
     return {
         "append_log": _tracked_append_log,

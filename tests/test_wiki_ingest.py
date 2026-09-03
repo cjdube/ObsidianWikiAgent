@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import wiki_ingest
-from agent import budget
+from agent import budget, loop
 from agent.wiki_tools import get_ingested_sources
 
 
@@ -181,6 +181,27 @@ def test_edit_counter_ignores_a_refused_edit(vault):
 
     assert "edited" in dispatch["edit_wiki_page"](
         name="real", section="Notes", content="- new fact\n"
+    )
+    assert writes
+
+
+def test_log_counter_ignores_a_failed_append(vault):
+    """Stage 3 needs the guarantee stages 2 already had. It used to count the
+    call before making it, so an append_log that raised still left the counter
+    true — _write_log_entry returned success, _ingest_source passed that up, and
+    ingest_vault marked the source ingested with nothing in log.md. Nothing
+    retries a marked source, so the entry was lost for good."""
+    writes = wiki_ingest._WriteCounter()
+    dispatch = wiki_ingest._log_dispatch(vault.path, writes)
+
+    # Through _dispatch_tool because that is how a tool call actually arrives,
+    # and because a missing required argument raises rather than returning.
+    assert "error" in loop._dispatch_tool("append_log", {}, dispatch, None)
+    assert not writes
+    assert not (vault.root / "wiki" / "log.md").exists()
+
+    assert "appended" in loop._dispatch_tool(
+        "append_log", {"entry": "- ingested src.md"}, dispatch, None
     )
     assert writes
 
