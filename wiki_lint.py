@@ -94,8 +94,10 @@ Your job is only the checks that need judgment:
 3. Out-of-scope pages — subjects the Scope section above excludes.
 4. Outdated claims — a claim a later source has superseded.
 
-Read wiki/index.md first, then read the pages you need. Report findings as a
-numbered list, each naming the specific pages and a suggested fix. Report only
+Call search_wiki_pages to find the pages a category concerns, then read them.
+You have no tool that returns the index; search is how you find out what exists.
+Report findings as a numbered list, each naming the specific pages and a
+suggested fix. Report only
 what you actually verified by reading the pages — if you find nothing in a
 category, say so rather than inventing something. Do not write to the wiki."""
 

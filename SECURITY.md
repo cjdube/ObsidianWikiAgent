@@ -55,9 +55,12 @@ network, and no path argument that bypasses those two guards. (Nine distinct
 tools are advertised across the three ingest stages — `PLAN_TOOL_SCHEMAS`,
 `CREATE_PAGE_TOOL_SCHEMAS`, `UPDATE_PAGE_TOOL_SCHEMAS` and `LOG_TOOL_SCHEMAS`
 in `agent/wiki_tools.py`. No stage sees all nine; each is offered only what its
-one job needs. The dispatch resolves a tenth, `read_index`, which is
-deliberately callable-but-unadvertised so a vault's `RULES.md` naming it in
-prose still works. It is a read, and it is inside the same guards.)
+one job needs. Each ingest stage's dispatch resolves a tenth, `read_index`,
+which is deliberately callable-but-unadvertised so a vault's `RULES.md` naming
+it in prose still works. It is a read, and it is inside the same guards. The
+read-only side — `wiki_query.py` and the lint judgment pass, both on
+`query_dispatch` — does not resolve it at all: the index grows with the vault,
+so those two find pages with `search_wiki_pages` instead.)
 
 The sharpest of those limits is the split between the two stage-2 sets. Which
 one a unit is offered is decided by whether its page is already on disk, not by

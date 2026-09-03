@@ -33,9 +33,30 @@ def test_an_incomplete_run_exits_non_zero(vault, monkeypatch, capsys):
     assert "without answering" in out.err
 
 
+def test_the_read_side_prompts_only_name_tools_it_can_dispatch(vault):
+    """Both prompts told the model to read wiki/index.md, and query_dispatch
+    stopped resolving read_index when the index outgrew a tool result. The call
+    came back as an unknown-tool error and cost an iteration on every run —
+    on the query path, and on the weekly deep lint that also spends a cloud
+    call. A prompt may only name a tool this dispatch actually has."""
+    import re
+
+    import wiki_lint
+    from agent.wiki_tools import query_dispatch
+
+    available = set(query_dispatch(vault.path))
+    assert "read_index" not in available  # the index is not a bounded result
+
+    for prompt in (wq.ANSWER_WRAPPER, wiki_lint.LINT_WRAPPER):
+        assert "index.md" not in prompt
+        named = set(re.findall(r"\b(read_index|[a-z_]+_wiki_pages?)\b", prompt))
+        assert named, "a workflow prompt that names no tool cannot be checked"
+        assert named <= available, f"prompt names {named - available}"
+
+
 def test_query_raises_the_iteration_cap_above_the_loop_default(vault, monkeypatch):
-    """The default 6 is index-plus-four-pages, and this workflow reads the
-    index first."""
+    """The default 6 is a search plus four pages, and this workflow searches
+    before it reads."""
     seen = {}
     monkeypatch.setattr(wq, "run_agent", lambda **kw: seen.update(kw) or "ok")
     monkeypatch.setattr("sys.argv", ["wiki_query.py", "--vault", vault.path, "q?"])

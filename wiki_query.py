@@ -17,21 +17,23 @@ from agent.loop import INCOMPLETE_PREFIX, run_agent
 from agent.wiki_tools import QUERY_TOOL_SCHEMAS, query_dispatch
 
 # agent.loop's default is 6, which is sized for a short exchange and not for the
-# workflow below: read the index, then read the pages you need, then answer. One
-# tool call per turn makes that the index plus four pages before the loop gives
-# up — and on a vault of a few hundred pages a question spanning five is
-# ordinary. 15 is proportionate for "index plus several pages". There is no
-# unattended-cost argument for keeping it tight here the way there is for the
-# ingest: this runs when a human asks it to and that human is waiting.
+# workflow below: search for the pages a question touches, read them, then
+# answer. One tool call per turn makes that a search plus four pages before the
+# loop gives up — and on a vault of a few hundred pages a question spanning five
+# is ordinary. 15 is proportionate for "a search or two plus several pages".
+# There is no unattended-cost argument for keeping it tight here the way there
+# is for the ingest: this runs when a human asks it to and that human is
+# waiting.
 MAX_QUERY_ITERATIONS = 15
 
 ANSWER_WRAPPER = """
 
 You are answering a single question from the vault's owner, on demand. Follow \
-the question-answering rules above: read wiki/index.md first to find relevant \
-pages, read those pages, synthesize an answer, and cite the specific wiki pages \
-you drew from by name. If the answer is not in the wiki, say so clearly instead \
-of guessing."""
+the question-answering rules above: call search_wiki_pages first to find \
+relevant pages, read those pages, synthesize an answer, and cite the specific \
+wiki pages you drew from by name. You have no tool that returns the index; \
+search_wiki_pages is how you find out what exists. If the answer is not in the \
+wiki, say so clearly instead of guessing."""
 
 
 def main() -> int:

@@ -1474,9 +1474,14 @@ LOG_TOOL_SCHEMAS = [
     APPEND_LOG_SCHEMA,
 ]
 
-# The read side keeps read_index: wiki_query.py and the lint judgment pass are
-# answering questions about the wiki as a whole, which is what a table of
-# contents is for, and neither runs in a loop that accumulates page after page.
+# The read side has no read_index, advertised or otherwise, and this is the one
+# dispatch where that is true — the ingest stages still resolve it unadvertised.
+# The index grows with the vault, and a whole table of contents is a tool result
+# sized by the vault rather than by the question. search_wiki_pages answers the
+# same "what exists about X" in a bounded number of rows. The prompts in
+# wiki_query.py and wiki_lint.py must therefore name search, not the index: they
+# told the model to read wiki/index.md for a while after the tool was gone,
+# which cost an unknown-tool error and an iteration every run.
 QUERY_TOOL_SCHEMAS = [
     SEARCH_WIKI_PAGES_SCHEMA,
     READ_WIKI_PAGE_SCHEMA,
