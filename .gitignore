@@ -19,6 +19,9 @@ logs/usage.jsonl*
 # Personal launchd jobs — concrete paths/labels stay local. Copy
 # launchd/template.plist.txt to make your own; the template is tracked.
 launchd/*.plist
+# install.sh builds the plist here first and leaves it for reading when plutil
+# rejects it. *.plist does not match *.plist.tmp, so one sat untracked.
+launchd/*.plist.tmp
 
 # Claude Code local state: per-machine permissions, scratch worktrees. Only a
 # machine-global ignore was covering these, which doesn't survive a clone.

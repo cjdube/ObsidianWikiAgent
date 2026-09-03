@@ -70,6 +70,23 @@ fi
 
 mkdir -p "$AGENTS" "$ROOT/logs"
 
+# A vault path is user text going into an XML document through sed, so it has to
+# survive two syntaxes, in this order:
+#
+#   XML   & < > are markup inside <string>. A vault at ~/Vaults/R&D produced a
+#         plist that plutil rejected with "unknown ampersand-escape sequence".
+#   sed   & in a replacement means "the whole match", so the same path put the
+#         placeholder back instead of itself and the run died on the
+#         placeholder check, blaming the template. \ and the | delimiter are
+#         syntax for the same reason.
+#
+# XML first: it emits &amp;, whose & then needs the sed escape.
+plist_value() {
+    printf '%s' "$1" \
+        | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+        | sed -e 's/[\\&|]/\\&/g'
+}
+
 for job in "${jobs[@]}"; do
     case "$job" in
         ingest) template="$ROOT/launchd/template.plist.txt" ;;
@@ -84,10 +101,10 @@ for job in "${jobs[@]}"; do
     # The templates are .txt because they are not valid plists until this runs:
     # <ABSOLUTE_PATH_TO_REPO> reads as an XML tag. Substituting the longest
     # placeholder first is not required here, since none is a prefix of another.
-    sed -e "s|<ABSOLUTE_PATH_TO_REPO>|$ROOT|g" \
-        -e "s|<ABSOLUTE_PATH_TO_VAULT>|$VAULT|g" \
-        -e "s|<VAULT_BASENAME>|$VAULT_BASENAME|g" \
-        -e "s|<VAULT_NAME>|$NAME|g" \
+    sed -e "s|<ABSOLUTE_PATH_TO_REPO>|$(plist_value "$ROOT")|g" \
+        -e "s|<ABSOLUTE_PATH_TO_VAULT>|$(plist_value "$VAULT")|g" \
+        -e "s|<VAULT_BASENAME>|$(plist_value "$VAULT_BASENAME")|g" \
+        -e "s|<VAULT_NAME>|$(plist_value "$NAME")|g" \
         "$template" > "$local_copy.tmp"
 
     if grep -q '<ABSOLUTE_PATH_TO_\|<VAULT_NAME>\|<VAULT_BASENAME>' "$local_copy.tmp"; then
@@ -98,6 +115,9 @@ for job in "${jobs[@]}"; do
 
     # plutil before launchctl: a malformed plist is rejected by bootstrap with a
     # bare "Input/output error", which says nothing about what is wrong.
+    # Left on disk deliberately, because the next thing to do is read it — but
+    # it is a .plist.tmp, which launchd/*.plist in .gitignore does not cover, so
+    # .gitignore names it too. One escaped from a failed run and sat untracked.
     if ! plutil -lint "$local_copy.tmp" >/dev/null; then
         echo "error: generated plist is not valid: $local_copy.tmp" >&2
         exit 1
