@@ -1157,8 +1157,20 @@ def update_index(vault_path: str, page: str, section: str) -> dict:
         name = _safe_page_path(vault_path, page.strip()).name[: -len(".md")]
     except ValueError as e:
         return {"error": str(e)}
-    if name not in {p[: -len(".md")] for p in pages}:
-        return {"error": f"no wiki page named '{name}' — write the page first"}
+    on_disk = {p[: -len(".md")] for p in pages}
+    if name not in on_disk:
+        # A page a human added in Obsidian keeps the capitals they typed, and
+        # _safe_page_path lower-cases. On a case-insensitive filesystem the
+        # file still opens, so page_exists said the page was there while this
+        # said it was not, and the page went to Unfiled with nothing reporting
+        # why. Match the file case-insensitively, then adopt its own spelling:
+        # _normalize_index compares index links against the on-disk names
+        # verbatim, so a lower-cased link to 'Model-Fusion.md' would be
+        # delinked as broken and the page listed under Unfiled anyway.
+        matched = [p for p in sorted(on_disk) if p.casefold() == name.casefold()]
+        if not matched:
+            return {"error": f"no wiki page named '{name}' — write the page first"}
+        name = matched[0]
     section = section.strip().lstrip("#").strip()
     if not section:
         return {"error": "section is required, e.g. 'AI & Agent Development'"}

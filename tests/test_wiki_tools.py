@@ -1411,6 +1411,26 @@ def test_update_index_files_a_page_named_in_the_case_the_plan_used(vault):
     assert "## Daily Logs" in index
 
 
+def test_update_index_files_a_page_a_human_named_with_capitals(vault):
+    # The other direction of the same mismatch: the tools lower-case, but a
+    # person adding a page in Obsidian does not, and on a case-insensitive
+    # filesystem that file opens either way. page_exists therefore said yes
+    # while update_index said "write the page first", and the page sat under
+    # Unfiled. The entry has to carry the on-disk spelling — _normalize_index
+    # compares links against the real filenames, so a lower-cased link would be
+    # delinked as broken.
+    (vault.root / "wiki" / "Model-Fusion.md").write_text(
+        "# Model Fusion\n\n**Summary**: s.\n", encoding="utf-8"
+    )
+
+    result = wt.update_index(vault.path, "Model-Fusion", "Topics")
+
+    assert result.get("filed") == "Model-Fusion"
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "- [[Model-Fusion]]" in index
+    assert "Unfiled" not in index
+
+
 def test_update_index_still_refuses_a_name_that_leaves_the_wiki(vault):
     vault.page("a", "# A\n\n**Summary**: s.\n")
     result = wt.update_index(vault.path, "../outside", "Topics")
