@@ -18,13 +18,22 @@ to the vault.
 Three exceptions, all in your control:
 
 - **`LLM_PROVIDER=gemini`** sends the vault pages and raw sources that run
-  reads to Google's API. Nothing in this repo turns it on: `DEFAULT_PROVIDER`
-  is `ollama`, `config/.env.example` ships the line commented out, and neither
-  plist template sets it. Switching it on is a choice you make — per run
-  (`LLM_PROVIDER=gemini .venv/bin/python wiki_ingest.py …`), or per job by
-  adding it to a plist's `EnvironmentVariables`. Concrete plists are
-  gitignored, so that choice never travels with a clone; if you make it for a
-  scheduled job, vault content goes to a third party on that job's schedule.
+  reads to Google's API. `DEFAULT_PROVIDER` is `ollama` and
+  `config/.env.example` ships the line commented out, so nothing you run by
+  hand switches it on by itself. **One tracked file does set it**:
+  `launchd/template-lint.plist.txt` puts `LLM_PROVIDER=gemini` in the weekly
+  audit job's `EnvironmentVariables`, because that pass is the one place model
+  quality decides whether the findings are worth reading. That template is why
+  `lint` is opt-in in `launchd/install.sh` — `install.sh <vault>` with no job
+  named installs `ingest` and `snapshot` only, and you have to ask for `lint`
+  by name. Once you do, that vault's pages go to Google every Sunday until you
+  drop the key from the generated plist. Delete the two `LLM_PROVIDER` lines
+  from your copy to audit locally instead. The other two templates
+  (`template.plist.txt`, `template-snapshot.plist.txt`) set no provider, so the
+  daily jobs stay on Ollama. Concrete plists are gitignored, so a *generated*
+  job's settings never travel with a clone — but the lint template's default
+  does, which is the point of this paragraph. You can also switch per run:
+  `LLM_PROVIDER=gemini .venv/bin/python wiki_ingest.py …`.
 - **ntfy failure alerts** (`NTFY_URL`) carry the job name and an error string,
   truncated to 500 characters. In practice that error is a filename or a path.
   It is not *guaranteed* to be content-free, though: the detail passed to
