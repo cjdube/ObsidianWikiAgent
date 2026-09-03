@@ -38,6 +38,25 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
 _RETRY_STATUSES = (429, 500, 502, 503, 504)
 _MAX_HTTP_ATTEMPTS = 5
 
+# Substrings that make a 429 a standing account state rather than a rate limit.
+# Gemini answers both with 429 RESOURCE_EXHAUSTED, and the two want opposite
+# handling: a rate limit clears while the caller waits, a depleted prepaid
+# balance does not clear until someone tops it up. On 2026-09-03 a --deep lint
+# spent 32s over five attempts on "Your prepayment credits are depleted." and
+# then failed anyway, once per iteration, for the whole run.
+#
+# Matched narrowly and only against the message text, because the safe
+# direction is asymmetric: retrying an unrecoverable error wastes 32 seconds,
+# while giving up on a recoverable one turns a blip into a failed unattended
+# run. Anything not matched here keeps the old backoff.
+#
+# A balance word AND an emptiness word, both required. "billing" alone is not
+# enough — Google's ordinary rate-limit message is "You exceeded your current
+# quota, please check your plan and billing details", and that one does clear
+# on its own. The pair is what separates "no money" from "too fast".
+_BALANCE_WORDS = ("credit", "balance", "funds")
+_DEPLETED_WORDS = ("deplet", "exhaust", "insufficient", "run out")
+
 # One connection pool for the process. A run is dozens of calls to the same host
 # — 30 iterations per source, per source — and every requests.post() opened a
 # fresh connection for each. Against localhost that is noise; against Gemini it
@@ -313,6 +332,28 @@ def _retry_delay(retry_after: Optional[str], attempt: int) -> float:
     return delay + random.uniform(0, 1)
 
 
+def _standing_account_error(resp: requests.Response) -> Optional[str]:
+    """The API's message when a 429 means the account, not the rate.
+
+    Returns None for an ordinary rate limit, which _post_with_retry should keep
+    backing off on. Body parsing is best-effort: a 429 with no JSON, or JSON in
+    an unexpected shape, is treated as an ordinary rate limit, because that is
+    the direction that only costs time.
+    """
+    try:
+        message = resp.json()["error"]["message"]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    if not isinstance(message, str):
+        return None
+    lowered = message.lower()
+    if any(w in lowered for w in _BALANCE_WORDS) and any(
+        w in lowered for w in _DEPLETED_WORDS
+    ):
+        return message.strip()
+    return None
+
+
 def _post_with_retry(
     url: str,
     payload: dict,
@@ -357,6 +398,16 @@ def _post_with_retry(
         if resp.status_code not in _RETRY_STATUSES:
             resp.raise_for_status()
             return resp
+        standing = _standing_account_error(resp)
+        if standing:
+            # Raise the API's own sentence, not "429 Client Error". This is the
+            # one failure whose fix is a person topping up an account, and the
+            # text is what reaches the ntfy alert.
+            raise requests.exceptions.HTTPError(
+                f"HTTP {resp.status_code} from model API, not retried — "
+                f"{standing}",
+                response=resp,
+            )
         if attempt == _MAX_HTTP_ATTEMPTS:
             resp.raise_for_status()
         delay = _retry_delay(resp.headers.get("Retry-After"), attempt)

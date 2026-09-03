@@ -256,6 +256,69 @@ def test_post_with_retry_retries_network_error(monkeypatch):
     assert resp.json() == {"ok": 3}
 
 
+_DEPLETED = {"error": {"message": "Your prepayment credits are depleted. Please "
+                                  "go to AI Studio to manage your project and "
+                                  "billing."}}
+
+
+def test_post_with_retry_does_not_retry_a_depleted_account(monkeypatch):
+    """A 429 that means "no money" never clears while the caller waits. On
+    2026-09-03 a --deep lint spent 32s over five attempts on this exact
+    message, once per iteration, and failed anyway."""
+    calls = []
+
+    def counting(*a, **kw):
+        calls.append(1)
+        return FakeResp(429, json_data=_DEPLETED)
+
+    def no_sleep(_s):
+        raise AssertionError("backed off on an error that never clears")
+
+    monkeypatch.setattr(loop.time, "sleep", no_sleep)
+    monkeypatch.setattr(loop._session, "post", counting)
+
+    try:
+        loop._post_with_retry("http://x", {})
+        assert False, "expected HTTPError"
+    except requests.exceptions.HTTPError as e:
+        # The API's own sentence, because the fix is a person topping up an
+        # account and this text is what reaches the alert.
+        assert "prepayment credits are depleted" in str(e)
+
+    assert len(calls) == 1
+
+
+def test_post_with_retry_still_retries_an_ordinary_quota_429(monkeypatch):
+    """The message that mentions billing but does clear on its own. Failing
+    fast here would turn a rate limit into a failed unattended run, which is
+    why the match needs a balance word and an emptiness word together."""
+    monkeypatch.setattr(loop.time, "sleep", lambda s: None)
+    quota = {"error": {"message": "You exceeded your current quota, please "
+                                  "check your plan and billing details."}}
+    monkeypatch.setattr(
+        loop._session, "post",
+        _sequenced([
+            FakeResp(429, headers={"Retry-After": "0"}, json_data=quota),
+            FakeResp(200, json_data={"ok": 4}),
+        ]),
+    )
+
+    assert loop._post_with_retry("http://x", {}).json() == {"ok": 4}
+
+
+def test_standing_account_error_ignores_a_body_it_cannot_read(monkeypatch):
+    """A 429 with no JSON is an ordinary rate limit as far as this can tell,
+    and guessing the other way costs an unattended run."""
+    class NoJson:
+        status_code = 429
+        headers: dict = {}
+
+        def json(self):
+            raise ValueError("not json")
+
+    assert loop._standing_account_error(NoJson()) is None
+
+
 def test_post_with_retry_gives_up(monkeypatch):
     monkeypatch.setattr(loop.time, "sleep", lambda s: None)
     monkeypatch.setattr(loop._session, "post", _sequenced([FakeResp(503)] * loop._MAX_HTTP_ATTEMPTS))
