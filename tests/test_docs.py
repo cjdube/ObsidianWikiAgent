@@ -50,3 +50,12 @@ def test_security_md_does_not_claim_the_templates_are_provider_free():
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
     for stale in ("neither plist template sets it", "Nothing in this repo turns it on"):
         assert stale not in security
+
+
+def test_readme_agrees_with_the_lint_template_existing():
+    """README used to send a reader to copy launchd/template.plist.txt for the
+    audit job, in a repo that has a template-lint.plist.txt and an install.sh
+    that picks it."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert (LAUNCHD / "template-lint.plist.txt").is_file()
+    assert "there is no lint template" not in readme

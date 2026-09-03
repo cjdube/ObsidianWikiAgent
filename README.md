@@ -51,11 +51,12 @@ launchd (per-vault .plist, timed)
           folder per file; no-op for vaults that declare none)
        -> finds raw/ sources not yet in wiki/.ingested.json, OLDEST FIRST
        -> for each source, three stages, each its OWN conversation:
-          1. plan    read_raw_file, list_wiki_pages,
+          1. plan    read_raw_file, search_wiki_pages,
                      list_index_sections -> submit_plan
                      (decides which pages to touch; writes nothing)
           2. execute one conversation PER PLANNED PAGE — read_raw_file,
-                     read_wiki_page, write_wiki_page, update_index
+                     read_wiki_page, and ONE of write_wiki_page /
+                     edit_wiki_page (filing is Python's job, not a tool call)
           3. log     append_log, once, for the whole source
        -> marks it ingested only if every planned page landed, and logs
           everything to logs/wiki_ingest.<vault>.log
@@ -126,13 +127,15 @@ differs; each provider owns its own request/history translation and they share
 the tool-dispatch step.
 
 The 6-iteration cap is only the default for callers that don't say otherwise —
-`wiki_ingest.py` sets 8 for its plan stage, 12 for execute and 4 for log (each
+`wiki_ingest.py` sets 14 for its plan stage, 12 for execute and 4 for log (each
 is a short conversation with one job; execute carries the extra slack because
 the cut-off nudge in `agent/loop.py` costs an iteration every time it fires,
 and one page in the 2026-08-20 run burned three that way before its write
 landed),
-`wiki_lint.py --deep` to 60, and `wiki_query.py` to 15 (the index plus several
-pages). A loop that runs out of turns returns a `[incomplete: …]` marker rather
+`wiki_lint.py --deep` to 60, and `wiki_query.py` to 15 (a search or two plus
+several pages — neither read-only path can read the whole index, because a
+table of contents is a tool result sized by the vault instead of by the
+question). A loop that runs out of turns returns a `[incomplete: …]` marker rather
 than an answer; `wiki_query.py` exits non-zero when it sees one, so a truncated
 run can't pass for a real reply.
 
@@ -355,15 +358,19 @@ Once a vault is set up and scheduled, this is the actual workflow:
    means the same thing either way: 1 means findings exist, not that the run
    failed.
 
-   A vault can audit itself on a schedule too, with a lint plist you write the
-   same way as an ingest one (there is no lint template — copy
-   `launchd/template.plist.txt` and point `ProgramArguments` at `wiki_lint.py`).
+   A vault can audit itself on a schedule too:
+   `./launchd/install.sh <vault-path> lint` fills in
+   `launchd/template-lint.plist.txt` and loads the job. `lint` has to be asked
+   for by name — `install.sh` with no job named installs `ingest` and
+   `snapshot` only — because this is the one template that ships
+   `LLM_PROVIDER=gemini`.
    The setup this was built against runs Sunday 10:00, after that morning's
-   ingest, and lands its report in `logs/<vault-name>-lint.launchd.log`. That
-   plist is also where `LLM_PROVIDER=gemini` gets set, because the judgment
-   pass is where model quality decides whether the findings are worth reading —
-   a deliberate, per-job choice, and the one place vault content leaves the
-   machine. The daily ingests stay on the local default.
+   ingest, and lands its report in `logs/<vault-name>-lint.launchd.log`. The
+   provider is set there because the judgment pass is where model quality
+   decides whether the findings are worth reading — and it is the one place
+   vault content leaves the machine. Drop the two `LLM_PROVIDER` lines from
+   your generated plist to audit locally instead. The daily ingests stay on the
+   local default.
 
    The prose report is for a human; alongside it the run is logged through
    `setup_logger` like the ingest and snapshot jobs are — run boundaries,
