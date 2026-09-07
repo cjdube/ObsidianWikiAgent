@@ -997,7 +997,28 @@ def edit_wiki_page(
     body = original[len(head):]
 
     if content.strip() in body:
-        return {"unchanged": path.name, "reason": "that content is already on the page"}
+        # Says what to do next, not just what happened. 'that content is
+        # already on the page' is a bare 'no', and this file already knows what
+        # a bare 'no' costs — see _this_page_only in wiki_ingest.py, and
+        # _refuse_truncated_call, which stopped a three-deep retry loop by
+        # naming the remedy instead of the fault. Measured over the live
+        # launchd log to 2026-09-07: 122 of 346 edit_wiki_page calls came back
+        # unchanged, and 90 of those 122 were byte-identical to the call
+        # immediately before them, in runs of up to nine. firecrawl.md on
+        # 2026-09-02 was edited successfully on iteration 4 and then sent the
+        # same call on 5, 6, 7, 8 and 9. The model is not failing to write, it
+        # is failing to notice that it already has.
+        return {
+            "unchanged": path.name,
+            "reason": (
+                f"that content is already on {path.name}, so this page is "
+                f"in the state you wanted — nothing was lost and nothing "
+                f"failed. Do not send this call again; it will return this "
+                f"same result. If the source has other material for this "
+                f"page, send that instead. If it does not, this page is "
+                f"finished: say so in one sentence and stop."
+            ),
+        }
 
     section = section.strip().lstrip("#").strip()
     if not section:

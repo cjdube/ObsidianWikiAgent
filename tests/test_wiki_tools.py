@@ -1318,6 +1318,43 @@ def test_edit_wiki_page_still_reports_unchanged_after_the_case_fix(vault):
     assert "unchanged" in again
 
 
+def test_unchanged_tells_the_model_not_to_resend_the_call(vault):
+    """A bare 'that content is already on the page' reads as a soft failure,
+    and a model mid-workflow that is only told 'no' retries the same call —
+    this repo's own words, in _this_page_only. Measured over the live launchd
+    log to 2026-09-07: 122 of 346 edit_wiki_page calls came back unchanged and
+    90 of those were byte-identical to the call before them, in runs of up to
+    nine. The result has to name the remedy, the way _refuse_truncated_call
+    does, or stage 2 keeps spending its 12-turn budget on nothing."""
+    vault.page("qwen", "# Qwen\n\n**Sources**: a.md\n**Last updated**: 2026-08-01\n\n## Notes\n\nOld.\n")
+    wt.edit_wiki_page(vault.path, "b.md", "qwen", "Notes", "- new material")
+
+    again = wt.edit_wiki_page(vault.path, "b.md", "qwen", "Notes", "- new material")
+
+    reason = again["reason"]
+    # It has to say the page is fine, or the model reads it as damage to repair.
+    assert "state you wanted" in reason
+    # ...and that resending is not the move, which is the actual loop.
+    assert "Do not send this call again" in reason
+    # ...and what to do instead, both branches: more material, or stop.
+    assert "send that instead" in reason
+    assert "stop" in reason
+
+
+def test_unchanged_still_counts_as_a_write_not_an_error(vault):
+    """_counted in wiki_ingest.py increments on any result without an 'error'
+    key, and that is right: the content is on the page. Wording the reason more
+    firmly must not turn it into a failure, or _attempt would throw away a
+    finished page and re-run the whole conversation."""
+    vault.page("qwen", "# Qwen\n\n**Sources**: a.md\n**Last updated**: 2026-08-01\n\n## Notes\n\nOld.\n")
+    wt.edit_wiki_page(vault.path, "b.md", "qwen", "Notes", "- new material")
+
+    again = wt.edit_wiki_page(vault.path, "b.md", "qwen", "Notes", "- new material")
+
+    assert "error" not in again
+    assert again["unchanged"] == "qwen.md"
+
+
 def test_safe_page_path_lowercases_the_page_name(vault):
     """wiki/AI-Chat-Learnings-2026-08-21.md, named after its source rather
     than slugged from it, is how one uppercase page file got onto the vault."""
