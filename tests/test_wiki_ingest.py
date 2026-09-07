@@ -395,6 +395,51 @@ def test_source_that_never_plans_is_retried_then_left_unmarked(vault, monkeypatc
     assert get_ingested_sources(vault.path) == []
 
 
+def test_a_retried_stage_is_told_which_call_it_missed(vault, monkeypatch):
+    """Until 2026-09-07 all three attempts sent byte-identical prompts, so a
+    stage that had failed twice was told nothing the first attempt was not."""
+    prompts = []
+
+    def counted(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return _stages(dead_stage="plan")(**kwargs)
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", counted)
+    vault.raw("one.md", subdir="daily-notes")
+
+    wiki_ingest.ingest_vault(vault.path, _Logger())
+
+    assert len(prompts) == wiki_ingest.MAX_INGEST_ATTEMPTS
+    # The first attempt is left exactly as it was: the stage usually works, and
+    # a correction sent before anything has gone wrong is noise in the prompt.
+    assert "did not call" not in prompts[0]
+    for prompt in prompts[1:]:
+        assert "did not call submit_plan" in prompt
+
+
+def test_the_nudge_names_the_write_tool_that_step_was_given(vault, monkeypatch):
+    """Stage 2's two tool sets are chosen from disk, so the nudge has to be
+    too. Naming the other one would send the model at a call its dispatch does
+    not hold — an unknown-tool error in place of the write."""
+    prompts = []
+
+    def counted(**kwargs):
+        prompts.append(kwargs["user_prompt"])
+        return _stages(dead_stage="execute")(**kwargs)
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", counted)
+    vault.raw("one.md", subdir="daily-notes")
+    vault.page("alpha", "# Alpha\n\n**Summary**: already here\n")
+
+    wiki_ingest.ingest_vault(vault.path, _Logger())
+
+    retries = [p for p in prompts if "did not call" in p]
+    assert retries  # the page exists, so this step holds the edit tool
+    for prompt in retries:
+        assert "did not call edit_wiki_page" in prompt
+        assert "write_wiki_page" not in prompt
+
+
 def test_successful_source_is_marked(vault, monkeypatch):
     monkeypatch.setattr(wiki_ingest, "run_agent", lambda **kw: _writes(**kw))
     vault.raw("one.md", subdir="daily-notes")

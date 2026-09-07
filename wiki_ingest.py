@@ -602,18 +602,40 @@ def sort_raw_files(vault_path: str, logger) -> None:
             logger.info(f"Sorted '{filename}' -> {result['moved']}")
 
 
-def _attempt(what: str, logger, run) -> bool:
+# Appended to the user prompt from the second attempt on. The first attempt is
+# left exactly as it was: the stage usually works, and a correction sent before
+# anything has gone wrong is only noise in the prompt.
+RETRY_NUDGE = """
+
+Your previous reply did not call {tool}, so nothing was saved. Only a tool \
+call changes anything here — ordinary text in a reply is discarded, however \
+complete it is. Send it again as a {tool} call. If that reply already \
+contained the finished text, reuse it exactly rather than starting over."""
+
+
+def _attempt(what: str, logger, run, tool: str) -> bool:
     """Run one stage up to MAX_INGEST_ATTEMPTS times, returning whether it
-    succeeded. `run` returns True when the stage did its job.
+    succeeded. `run` takes the retry nudge to append to its user prompt, and
+    returns True when the stage did its job. `tool` is the call that stage is
+    retrying for, named back to the model.
 
     The local model intermittently reads its input and then answers without
     calling a tool — a transient no-op rather than a capacity problem (observed
     2026-05-11, which finally wrote its 14 pages on the 4th identical attempt).
     That is what the retry is for, and it applies to all three stages.
+
+    The retry says what went wrong, because until 2026-09-07 it did not: all
+    three attempts sent byte-identical prompts, so a stage that had failed
+    twice was told nothing the first attempt had not been told. What the model
+    produces on this failure is not junk — the 09-07 run wrote the whole of
+    'ax-designer' as ordinary reply text three times, correct and complete
+    each time, and lost it three times, leaving two pages linking to a page
+    that does not exist. Naming the missing call is what that reply needed.
     """
     for attempt in range(1, MAX_INGEST_ATTEMPTS + 1):
+        nudge = "" if attempt == 1 else RETRY_NUDGE.format(tool=tool)
         try:
-            if run():
+            if run(nudge):
                 return True
         except budget.BudgetExceeded:
             # The whole point of the budget is that it outranks the retry
@@ -635,7 +657,7 @@ def _plan_source(vault_path: str, filename: str, rules: str, logger) -> _Plan:
     """Stage 1: decide which pages this source should touch. Writes nothing."""
     plan = _Plan()
 
-    def run() -> bool:
+    def run(nudge: str) -> bool:
         plan.pages = []
         result = run_agent(
             system_prompt=rules + UNATTENDED_WRAPPER + PLAN_WRAPPER,
@@ -643,7 +665,7 @@ def _plan_source(vault_path: str, filename: str, rules: str, logger) -> _Plan:
                 f"Plan the ingest of the source file '{filename}' from raw/. "
                 "Read it, list the existing wiki pages and the index sections, "
                 "then call submit_plan once with every page this source should "
-                "create or update."
+                "create or update." + nudge
             ),
             tools=PLAN_TOOL_SCHEMAS,
             dispatch=_plan_dispatch(vault_path, plan),
@@ -653,7 +675,7 @@ def _plan_source(vault_path: str, filename: str, rules: str, logger) -> _Plan:
         logger.info(f"Plan response for '{filename}': {result}")
         return bool(plan)
 
-    _attempt(f"planning '{filename}'", logger, run)
+    _attempt(f"planning '{filename}'", logger, run, "submit_plan")
     return plan
 
 
@@ -714,7 +736,7 @@ def _execute_unit(
     # into `done` and hands to _write_log_entry.
     unit["action"] = "update" if exists else "create"
 
-    def run() -> bool:
+    def run(nudge: str) -> bool:
         writes.count = 0
         result = run_agent(
             system_prompt=rules + UNATTENDED_WRAPPER + wrapper,
@@ -728,6 +750,7 @@ def _execute_unit(
                 "this source — link to them where the text calls for it, and do "
                 "not duplicate what they cover: "
                 + (", ".join(f"[[{n}]]" for n in siblings) if siblings else "none")
+                + nudge
             ),
             tools=schemas,
             dispatch=_execute_dispatch(
@@ -759,7 +782,15 @@ def _execute_unit(
         _file_planned_page(vault_path, unit, logger)
         return True
 
-    return _attempt(f"writing '{unit['name']}' for '{filename}'", logger, run)
+    return _attempt(
+        f"writing '{unit['name']}' for '{filename}'",
+        logger,
+        run,
+        # The tool this step was actually given, which the schema split decided
+        # from disk above. Naming the other one would send the model to a call
+        # its dispatch does not hold.
+        "edit_wiki_page" if exists else "write_wiki_page",
+    )
 
 
 def _write_log_entry(
@@ -776,7 +807,7 @@ def _write_log_entry(
     created = [u["name"] for u in done if u["action"] == "create"]
     updated = [u["name"] for u in done if u["action"] != "create"]
 
-    def run() -> bool:
+    def run(nudge: str) -> bool:
         writes.count = 0
         result = run_agent(
             system_prompt=rules + UNATTENDED_WRAPPER + LOG_WRAPPER,
@@ -785,7 +816,7 @@ def _write_log_entry(
                 f"Pages created: {', '.join(created) if created else 'none'}\n"
                 f"Pages updated: {', '.join(updated) if updated else 'none'}\n"
                 f"Skipped as out of scope: {plan.skipped or 'nothing'}\n\n"
-                "Append one log.md entry recording this."
+                "Append one log.md entry recording this." + nudge
             ),
             tools=LOG_TOOL_SCHEMAS,
             dispatch=_log_dispatch(vault_path, writes),
@@ -796,7 +827,7 @@ def _write_log_entry(
         logger.info(f"Log entry for '{filename}': {result}")
         return bool(writes)
 
-    return _attempt(f"logging '{filename}'", logger, run)
+    return _attempt(f"logging '{filename}'", logger, run, "append_log")
 
 
 def _ingest_source(vault_path: str, filename: str, rules: str, logger) -> bool:
