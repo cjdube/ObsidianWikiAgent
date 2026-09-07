@@ -72,17 +72,24 @@ from agent.wiki_tools import (
 # conversation with one job, where the old single-pass ingest needed 30 to carry
 # a whole source from read to log in one context.
 #
-# Stage 1 reads the source, searches the wiki once per topic it found, lists the
-# index sections, then submits the plan. The per-topic search is why this is not
-# the 4 calls it used to be: the stage held list_wiki_pages, one call that
-# returned the whole vault, until search_wiki_pages replaced it to keep the
-# result bounded by the answer rather than by vault size. The budget did not
-# move with it, and a daily source carries four to seven topics, so every source
-# in the 2026-08-29 runs finished planning on call 6, 7 or 8 of 8 — or ran out.
-# Which side of that a source landed on was luck: AI-Chat-Learnings-2026-08-28
-# exhausted three attempts in one run and planned on call 7 in the next, from
-# the same bytes. This is headroom over the observed worst case, not a measured
-# ceiling.
+# Stage 1 reads the source, searches the wiki for every topic it found, lists
+# the index sections, then submits the plan: 4 calls, and 4 whatever the source
+# turns out to carry. It cost topics + 3 for as long as search_wiki_pages took
+# one topic per call, and that is a budget set by the input rather than by the
+# stage — a daily source carries four to seven topics, so the 2026-08-29 runs
+# finished planning on call 6, 7 or 8 of 8, or ran out, and which side a source
+# landed on was luck: AI-Chat-Learnings-2026-08-28 exhausted three attempts in
+# one run and planned on call 7 in the next, from the same bytes. Raising the
+# cap to 14 bought a year of daily logs, not a fix; Daily-Chrome-2026-09-03
+# spent 11 calls on 11 topics and landed submit_plan on turn 14 of 14, with the
+# whole plan riding on the last turn it had. search_wiki_pages now answers a
+# list of topics in one call, which is what makes this a constant.
+#
+# Left at 14 rather than cut back to the 4 the stage needs. The cap is not
+# costing anything — a stage that finishes in 4 calls never reaches it — and
+# the model is being asked to batch, not forced to: one that still searches a
+# topic at a time gets the old behaviour and the old headroom instead of a
+# thrown-away plan.
 MAX_PLAN_ITERATIONS = 14
 # Stage 2 reads the source, optionally reads the page it is updating, writes it,
 # and files it in the index: 4 calls. The extra slack is for the cut-off nudge in
@@ -174,10 +181,11 @@ touch. You are not writing any page content in this step — a later step writes
 each page, one at a time.
 
 1. Read the source document in full.
-2. Search the existing wiki pages for each topic. This is how you tell a new page from an \
-existing one: if a page already covers the entity or concept, the action is \
-'update', not 'create'. Never propose a second page for something the wiki \
-already covers under a different name.
+2. Search the existing wiki pages for every topic you found, in ONE \
+search_wiki_pages call listing all of them. This is how you tell a new page \
+from an existing one: if a page already covers the entity or concept, the \
+action is 'update', not 'create'. Never propose a second page for something \
+the wiki already covers under a different name.
 3. List the index sections, so you can name the section each page belongs under.
 4. Call submit_plan ONCE with the full list, then stop.
 

@@ -1454,6 +1454,94 @@ def test_search_looks_through_a_md_extension_on_the_query(vault):
     assert names == ["claude-code.md"]
 
 
+def test_search_answers_every_topic_in_one_call(vault):
+    """The plan stage's iteration count used to be a property of the source.
+    One call per topic cost topics + 3 against a cap of 14, so
+    Daily-Chrome-2026-09-03 spent 11 calls on 11 topics and landed submit_plan
+    on turn 14 of 14 — the whole plan riding on the last turn it had. A list of
+    topics answered in one call is what makes planning cost the same for a
+    one-topic clipping and a twenty-topic daily log."""
+    vault.page("ollama", "# Ollama\n\n**Summary**: the local runner\n")
+    vault.page("astro", "# Astro\n\n**Summary**: a site framework\n")
+
+    result = wt.search_wiki_pages(vault.path, ["ollama", "astro", "tailscale"])
+
+    # Order is the caller's, so the planner can match replies to the topics it
+    # asked about without matching on the query string.
+    assert [r["query"] for r in result["results"]] == ["ollama", "astro", "tailscale"]
+    assert [p["name"] for p in result["results"][0]["pages"]] == ["ollama.md"]
+    assert [p["name"] for p in result["results"][1]["pages"]] == ["astro.md"]
+    # A topic with no page is what tells the planner to plan a create.
+    assert result["results"][2]["pages"] == []
+
+
+def test_search_spends_the_same_row_budget_however_many_topics_it_is_asked(vault):
+    """Batching the calls must not unbatch the bound. search_wiki_pages exists
+    because list_wiki_pages returned a result sized by the vault; twenty topics
+    at forty rows each would be that same unbounded reply through a new door.
+    More topics buy fewer rows each, never more rows in total."""
+    for i in range(45):
+        vault.page(f"topic-{i:02d}", f"# Topic {i}\n\n**Summary**: agents and tools\n")
+
+    for topics in (["agents"], ["agents", "tools"], ["agents"] + [f"topic-{i:02d}" for i in range(19)]):
+        result = wt.search_wiki_pages(vault.path, topics)
+        rows = sum(len(r["pages"]) for r in result["results"])
+        assert rows <= 40, f"{len(topics)} topics returned {rows} rows"
+
+
+def test_search_still_finds_a_topic_when_the_budget_is_split_widest(vault):
+    """The floor of two rows per query is what keeps a split budget an answer
+    rather than a shape. Rank 0 sorts an exact identity match first, so the
+    page a topic names survives however many topics share the call."""
+    for i in range(45):
+        vault.page(f"aaa-log-{i:02d}", f"# Log {i}\n\n**Summary**: notes about ollama\n")
+    vault.page("ollama", "# Ollama\n\n**Summary**: the local runner\n")
+
+    result = wt.search_wiki_pages(vault.path, ["ollama"] + [f"other-{i}" for i in range(19)])
+
+    assert result["results"][0]["pages"][0]["name"] == "ollama.md"
+
+
+def test_search_returns_the_flat_shape_for_a_single_string_query(vault):
+    """The reply's shape follows the argument's, so a caller never has to count
+    its own queries to read the answer. wiki_query and wiki_lint search one
+    topic at a time and are unchanged by the plan stage's batching."""
+    vault.page("ollama", "# Ollama\n\n**Summary**: the local runner\n")
+
+    result = wt.search_wiki_pages(vault.path, "ollama")
+
+    assert [p["name"] for p in result["pages"]] == ["ollama.md"]
+    assert "results" not in result
+
+
+def test_search_drops_repeated_topics_rather_than_answering_them_twice(vault):
+    """A model listing a source's topics repeats itself. A repeated query
+    spends rows from the shared budget to say what the reply already said."""
+    vault.page("ollama", "# Ollama\n\n**Summary**: the local runner\n")
+
+    result = wt.search_wiki_pages(vault.path, ["ollama", "Ollama", " ollama ", ""])
+
+    assert [r["query"] for r in result["results"]] == ["ollama"]
+
+
+def test_search_refuses_more_topics_than_the_budget_can_answer(vault):
+    """Past the point where every topic gets its floor of rows, the reply stops
+    being an answer. Refusing says so; truncating the list silently would leave
+    the planner planning a create for a topic it never actually searched."""
+    result = wt.search_wiki_pages(vault.path, [f"topic-{i}" for i in range(21)])
+
+    assert "error" in result
+    assert "21" in result["error"]
+
+
+def test_search_asks_for_every_topic_at_once_in_its_schema(vault):
+    """The tool accepting a list fixes nothing on its own — the model has to
+    send one. The array type is what stops it spending a turn per topic."""
+    params = wt.SEARCH_WIKI_PAGES_SCHEMA["function"]["parameters"]
+
+    assert params["properties"]["query"]["type"] == "array"
+
+
 def test_update_index_files_a_page_named_in_the_case_the_plan_used(vault):
     # write_wiki_page lower-cases through _safe_page_path, so a plan naming
     # 'AI-Chat-Learnings' produces ai-chat-learnings.md. update_index compared

@@ -443,8 +443,90 @@ def _squash(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
-def search_wiki_pages(vault_path: str, query: str, limit: int = 40) -> dict:
+# Total rows one search call may return, however many topics it asks about.
+# The plan stage used to spend one call per topic and a Daily-Chrome log
+# carries ten or more, so planning cost topics + 3 iterations against a cap of
+# 14 — submit_plan landed on turn 14 of 14 in every run that reached it
+# (2026-09-01, 2026-09-07), and one more topic would have thrown the plan away.
+# Asking about every topic at once makes the iteration count a property of the
+# stage rather than of the source. The row budget is what stops that trade
+# turning into the unbounded result search_wiki_pages replaced list_wiki_pages
+# to avoid: many topics get fewer rows each, never more rows in total.
+_SEARCH_ROW_BUDGET = 40
+# Below this a query cannot answer "does a page for this already exist?" — rank
+# 0 sorts an exact identity match first, so two rows show it and its nearest
+# rival. 20 topics x 2 rows is the budget exactly.
+_MIN_ROWS_PER_QUERY = 2
+_MAX_SEARCH_QUERIES = 20
+
+
+def _score_query(pages, needle: str, cap: int) -> list[dict]:
+    """Rank one query against an already-scanned vault. See search_wiki_pages."""
+    # Models pass filenames as often as names — 'claude-code.md' for the page
+    # 'claude-code'. Squashing keeps the '.md' as letters, so the extension
+    # would otherwise be the one spelling difference this cannot see through.
+    squashed = _squash(needle[:-3] if needle.endswith(".md") else needle)
+    scored = []
+    for name, summary, parts, identity in pages:
+        # An identity hit means the page is *about* the query; a summary hit
+        # means it mentions it. Sorting on that, then on name so ties stay
+        # stable, is what keeps a topic page ahead of a month of daily logs.
+        #
+        # Exact is its own tier above partial because alphabetical tie-breaking
+        # is arbitrary among identity matches, and arbitrary loses to the page
+        # the query actually named: 'claude-code' ranked
+        # 50-claude-code-tips-and-best-practices-for-daily-use.md above
+        # claude-code.md purely on the leading digit.
+        if squashed and squashed in parts:
+            rank = 0
+        elif squashed and squashed in identity:
+            rank = 1
+        elif needle in summary.lower():
+            rank = 2
+        else:
+            continue
+        scored.append((rank, name, summary))
+    scored.sort(key=lambda item: (item[0], item[1]))
+    return [{"name": n, "summary": s} for _, n, s in scored[:cap]]
+
+
+def _scan_pages_for_search(vault_path: str) -> list[tuple]:
+    """Every page's name, summary and squashed identity, read once.
+
+    One pass serves every query in the call. Scanning per query cost ~10ms over
+    500 pages, which was already cheap against the ~10s model call that asked;
+    it is the model's *turns* that a multi-topic search is spending less of.
+    """
+    scanned = []
+    for name in list_wiki_pages(vault_path)["pages"]:
+        path = _wiki_dir(vault_path) / name
+        content = path.read_text(encoding="utf-8", errors="replace")
+        summary_match = re.search(r"^\*\*Summary\*\*:\s*(.*)$", content, re.MULTILINE)
+        title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+        summary = summary_match.group(1).strip() if summary_match else ""
+        title = title_match.group(1).strip() if title_match else ""
+        stem = name[:-3] if name.endswith(".md") else name
+        parts = [_squash(stem)]
+        if title:
+            parts.append(_squash(title))
+        scanned.append((name, summary, parts, _squash(f"{stem} {title}")))
+    return scanned
+
+
+def search_wiki_pages(vault_path: str, query=None, limit: int = 40, **_ignored) -> dict:
     """Return a bounded set of pages relevant to a name/title/summary query.
+
+    `query` defaults, and unknown keywords are swallowed, so a model that names
+    the argument 'queries' or 'topics' gets "query is required" rather than a
+    missing-argument TypeError. _refuse_truncated_call carries what that
+    distinction cost: a TypeError tells the model its call failed without
+    telling it what to send instead, and it re-sent the same one three times.
+
+    `query` is one topic, or a list of topics answered in a single call. The
+    shape of the answer follows the shape of the argument: a string returns
+    {"pages": [...]}, a list returns {"results": [{"query", "pages"}, ...]}, so
+    a caller never has to count its own queries to read the reply. A list is
+    how the ingest plan stage asks — see _SEARCH_ROW_BUDGET for why.
 
     Reads the title as well as the filename, and ranks before it truncates.
     Both are the same bug seen from two sides. This matched only 'name +
@@ -462,54 +544,42 @@ def search_wiki_pages(vault_path: str, query: str, limit: int = 40) -> dict:
     local-llma-agent.md came from. Identity matches therefore outrank
     summary-only mentions, and truncation drops mentions rather than the page
     the query named.
-
-    Scanning every page costs ~10ms over 500 pages, against ~10s for the model
-    call that asked, so the early exit this used to take was not worth its cost
-    in wrong answers.
     """
-    needle = query.strip().lower()
-    if not needle:
+    many = isinstance(query, (list, tuple))
+    raw = list(query) if many else [query]
+    # Duplicates are dropped rather than answered twice: a model listing a
+    # source's topics repeats itself, and a repeated query spends rows from the
+    # budget to say what the reply already said. Order is the caller's, so it
+    # can match replies to the topics it asked about.
+    needles, seen = [], set()
+    for item in raw:
+        needle = str(item or "").strip().lower()
+        if needle and needle not in seen:
+            seen.add(needle)
+            needles.append(needle)
+    if not needles:
         return {"error": "query is required"}
-    cap = max(1, min(limit, 40))
-    # Models pass filenames as often as names — 'claude-code.md' for the page
-    # 'claude-code'. Squashing keeps the '.md' as letters, so the extension
-    # would otherwise be the one spelling difference this cannot see through.
-    squashed = _squash(needle[:-3] if needle.endswith(".md") else needle)
-    scored = []
-    for name in list_wiki_pages(vault_path)["pages"]:
-        path = _wiki_dir(vault_path) / name
-        content = path.read_text(encoding="utf-8", errors="replace")
-        summary_match = re.search(r"^\*\*Summary\*\*:\s*(.*)$", content, re.MULTILINE)
-        title_match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-        summary = summary_match.group(1).strip() if summary_match else ""
-        stem = name[:-3] if name.endswith(".md") else name
-        identity = f"{stem} {title_match.group(1).strip() if title_match else ''}"
-        # An identity hit means the page is *about* the query; a summary hit
-        # means it mentions it. Sorting on that, then on name so ties stay
-        # stable, is what keeps a topic page ahead of a month of daily logs.
-        #
-        # Exact is its own tier above partial because alphabetical tie-breaking
-        # is arbitrary among identity matches, and arbitrary loses to the page
-        # the query actually named: 'claude-code' ranked
-        # 50-claude-code-tips-and-best-practices-for-daily-use.md above
-        # claude-code.md purely on the leading digit.
-        parts = [_squash(stem)]
-        if title_match:
-            parts.append(_squash(title_match.group(1).strip()))
-        if squashed and squashed in parts:
-            rank = 0
-        elif squashed and squashed in _squash(identity):
-            rank = 1
-        elif needle in summary.lower():
-            rank = 2
-        else:
-            continue
-        scored.append((rank, name, summary))
-    scored.sort(key=lambda item: (item[0], item[1]))
-    return {
-        "pages": [{"name": n, "summary": s} for _, n, s in scored[:cap]],
-        "limit": cap,
-    }
+    if len(needles) > _MAX_SEARCH_QUERIES:
+        return {
+            "error": f"too many queries ({len(needles)}) — ask about at most "
+                     f"{_MAX_SEARCH_QUERIES} topics per call"
+        }
+
+    # Per query, not per call: the budget is what the whole reply costs, so
+    # more topics buy fewer rows each rather than a longer reply.
+    cap = max(1, min(limit, _SEARCH_ROW_BUDGET))
+    if many:
+        cap = max(_MIN_ROWS_PER_QUERY, min(cap, _SEARCH_ROW_BUDGET // len(needles)))
+
+    pages = _scan_pages_for_search(vault_path)
+    if many:
+        return {
+            "results": [
+                {"query": n, "pages": _score_query(pages, n, cap)} for n in needles
+            ],
+            "limit": cap,
+        }
+    return {"pages": _score_query(pages, needles[0], cap), "limit": cap}
 
 
 def read_wiki_page(vault_path: str, name: str) -> dict:
@@ -1345,10 +1415,16 @@ SEARCH_WIKI_PAGES_SCHEMA = {
     "type": "function",
     "function": {
         "name": "search_wiki_pages",
-        "description": "Find relevant wiki pages by matching a short term against page names, titles and Summary lines. Pages the term names are returned before pages that merely mention it, so if a page for a topic exists it is at the top of the results — spelling does not have to match the filename. Results are bounded; use read_wiki_page for details.",
+        "description": "Find relevant wiki pages by matching short terms against page names, titles and Summary lines. Ask about EVERY topic you need in ONE call by passing them all in 'query' — a second call for a second topic wastes a turn you may need later. Pages a term names are returned before pages that merely mention it, so if a page for a topic exists it is at the top of that topic's results — spelling does not have to match the filename. A topic with no page returns an empty list, which is how you tell a create from an update. Results are bounded; use read_wiki_page for details.",
         "parameters": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "A focused topic or name to search for."}},
+            "properties": {
+                "query": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Every topic or name to search for, one per entry — e.g. ['ollama', 'astro', 'tailscale']. Send them together, not one call each.",
+                },
+            },
             "required": ["query"],
         },
     },
