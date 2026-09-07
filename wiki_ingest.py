@@ -31,8 +31,10 @@ Usage:
 import argparse
 import functools
 import os
+import re
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 from agent import budget
@@ -248,9 +250,10 @@ LOG_WRAPPER = """
 You are step 3 of 3. Every page for this source has already been written. Your \
 only job is to record what happened.
 
-Call append_log ONCE with a single entry giving the date, the source filename, \
-which pages were created and which were updated, and anything that was skipped \
-as out of scope. The message below tells you exactly what happened — report \
+Call append_log ONCE with a single entry giving the source filename, which \
+pages were created and which were updated, and anything that was skipped as out \
+of scope. Do not write a date — the date is added for you, and one you write \
+would be dropped. The message below tells you exactly what happened — report \
 that, do not guess or add pages that are not listed.
 
 Then stop. Do not write or read any wiki page."""
@@ -479,7 +482,26 @@ def _execute_dispatch(
     return tools
 
 
-def _log_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
+_FILENAME_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def _log_entry_date(filename: str) -> str:
+    """The date a log.md entry for `filename` should carry.
+
+    The date every correct entry in this vault's log already uses is the
+    *source's*, read off names like 'Daily-Chrome-2026-09-05.md' — not the day
+    the run happened, which is often the morning after. 196 entries follow that,
+    so it is the convention, and this keeps it.
+
+    A source with no date in its name is where the model had nothing to copy and
+    invented one. Today is the only defensible answer there, and it is what the
+    three wrong entries should have said.
+    """
+    match = _FILENAME_DATE.search(Path(filename).stem)
+    return match.group(1) if match else date.today().isoformat()
+
+
+def _log_dispatch(vault_path: str, writes: _WriteCounter, entry_date: str) -> dict:
     """Stage 3's one advertised tool, plus the unadvertised read_index.
 
     read_index because the reason it is dispatchable in the other two stages —
@@ -492,7 +514,14 @@ def _log_dispatch(vault_path: str, writes: _WriteCounter) -> dict:
 
     @functools.wraps(append)
     def _tracked_append_log(**kwargs):
-        result = append(**kwargs)
+        # Bound here, and not merely defaulted inside append_log, so that a
+        # model which writes a date anyway cannot have it: this pops whatever
+        # arrived before substituting the real one, the same shape as stage 2's
+        # _this_page_only. Silent rather than a refusal — there is nothing for
+        # the model to fix, the value was never its business, and an error here
+        # would cost the shortest conversation in the run an iteration.
+        kwargs.pop("date_str", None)
+        result = append(date_str=entry_date, **kwargs)
         # Count the call that landed, not the call that was attempted, exactly
         # as _counted does in stage 2. Counting first made a failed append_log
         # read as success all the way up: _write_log_entry returns True on the
@@ -819,7 +848,7 @@ def _write_log_entry(
                 "Append one log.md entry recording this." + nudge
             ),
             tools=LOG_TOOL_SCHEMAS,
-            dispatch=_log_dispatch(vault_path, writes),
+            dispatch=_log_dispatch(vault_path, writes, _log_entry_date(filename)),
             logger=logger,
             max_iterations=MAX_LOG_ITERATIONS,
             think=False,

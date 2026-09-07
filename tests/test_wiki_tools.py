@@ -1210,6 +1210,35 @@ def test_write_wiki_page_refuses_reserved_names(vault, name):
     assert after == before
 
 
+def test_append_log_supplies_the_bullet_and_the_date(vault):
+    """Both used to be the model's to remember, and log.md is the record kept
+    outside its reach — a paragraph among list items, or a plausible wrong
+    date, reads as history until someone checks it against the ingest log."""
+    wt.append_log(vault.path, "ingested src.md -> created a.md", "2026-09-05")
+
+    log = (Path(vault.path) / "wiki" / "log.md").read_text(encoding="utf-8")
+    assert log.endswith("- 2026-09-05: ingested src.md -> created a.md\n")
+
+
+def test_append_log_takes_the_date_off_an_entry_that_carries_one(vault):
+    """The prompt tells the model not to write a date. Stripping one that
+    arrives anyway is what makes that a guarantee rather than an instruction —
+    and without it the line would read '- 2026-09-05: - 2025-05-22: ingested'."""
+    wt.append_log(vault.path, "- 2025-05-22: ingested src.md", "2026-09-05")
+
+    log = (Path(vault.path) / "wiki" / "log.md").read_text(encoding="utf-8")
+    assert log.endswith("- 2026-09-05: ingested src.md\n")
+    assert "2025-05-22" not in log
+
+
+def test_append_log_dates_itself_when_no_date_is_given(vault):
+    """The hand-edit path calls this with an entry and nothing else."""
+    wt.append_log(vault.path, "ingested src.md")
+
+    log = (Path(vault.path) / "wiki" / "log.md").read_text(encoding="utf-8")
+    assert log.endswith(f"- {date.today().isoformat()}: ingested src.md\n")
+
+
 def test_write_wiki_page_reserved_error_names_the_right_tool(vault):
     """The model is mid-workflow — a bare refusal just gets retried."""
     assert "update_index" in wt.write_wiki_page(vault.path, "index", "x")["error"]

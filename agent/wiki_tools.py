@@ -1235,12 +1235,37 @@ def update_index(vault_path: str, page: str, section: str) -> dict:
     return {"filed": name, "section": section, "unfiled": unfiled, "delinked": delinked}
 
 
-def append_log(vault_path: str, entry: str) -> dict:
+# The bullet and the date every log.md line opens with, stripped off whatever
+# the caller sent so this function can put them back itself. Both parts are
+# optional here because the model's habits vary: it has sent a bare body, a
+# bulleted body, and a bulleted body with its own date.
+_LOG_ENTRY_PREFIX = re.compile(r"^\s*(?:-\s*)?(?:\d{4}-\d{2}-\d{2}\s*:\s*)?")
+
+
+def append_log(vault_path: str, entry: str, date_str: str = "") -> dict:
+    """Append one entry to wiki/log.md, with the leading '- <date>: ' supplied
+    here rather than by the caller.
+
+    Python owns the date for the reason it owns '**Sources**' and
+    '**Last updated**': it is already known, and a value the model is asked for
+    is a value the model can get wrong. It did, three times — 2026-08-26 twice
+    and 2026-09-07 once, all three stamped '2025-05-22', which is nobody's
+    today. Every one of them was a source with no date in its filename, so the
+    model had nothing to copy and invented something instead. They read as
+    genuine history until someone checks them against the ingest log.
+
+    The bullet comes from here too. This used to write the caller's string
+    verbatim, so an entry sent without a leading '- ' rendered as a paragraph
+    in a file that is otherwise a list — one more thing that was correct only
+    while the model remembered to make it correct.
+    """
     wiki_dir = _wiki_dir(vault_path)
     wiki_dir.mkdir(parents=True, exist_ok=True)
     path = wiki_dir / "log.md"
+    body = _LOG_ENTRY_PREFIX.sub("", entry.strip()).strip()
+    line = f"- {date_str or date.today().isoformat()}: {body}"
     with path.open("a", encoding="utf-8") as f:
-        f.write(entry.rstrip("\n") + "\n")
+        f.write(line + "\n")
     return {"appended": True}
 
 
@@ -1420,7 +1445,7 @@ APPEND_LOG_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "entry": {"type": "string", "description": "One log entry, e.g. '- 2026-07-01: ingested meeting-notes.txt -> created speakers-bureau.md, updated volunteer-roster.md'."},
+                "entry": {"type": "string", "description": "What happened, and nothing else, e.g. 'ingested meeting-notes.txt -> created speakers-bureau.md, updated volunteer-roster.md'. Do NOT write a date or a leading '- '; both are added for you."},
             },
             "required": ["entry"],
         },

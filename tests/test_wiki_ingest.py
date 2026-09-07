@@ -4,6 +4,7 @@ run_agent is mocked throughout — these cover which sources get attempted,
 marked, and abandoned, not what the model produces.
 """
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -110,7 +111,7 @@ def test_every_stage_dispatches_every_tool_it_advertises(vault):
          wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=False)),
         (wt.UPDATE_PAGE_TOOL_SCHEMAS,
          wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=True)),
-        (wt.LOG_TOOL_SCHEMAS, wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter())),
+        (wt.LOG_TOOL_SCHEMAS, wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter(), "2026-09-07")),
     ):
         advertised = {t["function"]["name"] for t in schemas}
         assert advertised <= set(dispatch)
@@ -192,7 +193,7 @@ def test_log_counter_ignores_a_failed_append(vault):
     ingest_vault marked the source ingested with nothing in log.md. Nothing
     retries a marked source, so the entry was lost for good."""
     writes = wiki_ingest._WriteCounter()
-    dispatch = wiki_ingest._log_dispatch(vault.path, writes)
+    dispatch = wiki_ingest._log_dispatch(vault.path, writes, "2026-09-07")
 
     # Through _dispatch_tool because that is how a tool call actually arrives,
     # and because a missing required argument raises rather than returning.
@@ -228,10 +229,37 @@ def test_stage_wrappers_keep_the_hallucinated_kwarg_filter_working(vault):
         "update_index", {"page": "real", "section": "S", "name": "real"}, execute, None
     )
 
-    logs = wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter())
+    logs = wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter(), "2026-09-07")
     assert "appended" in loop._dispatch_tool(
         "append_log", {"entry": "- ingested src.md", "date": "2026-09-03"}, logs, None
     )
+
+
+def test_the_log_date_is_not_the_models_to_supply(vault):
+    """It wrote '2025-05-22' on three entries across two months — nobody's
+    today, and every one a source with no date in its name for it to copy."""
+    logs = wiki_ingest._log_dispatch(
+        vault.path, wiki_ingest._WriteCounter(), "2026-09-05"
+    )
+    assert "appended" in loop._dispatch_tool(
+        "append_log",
+        {"entry": "- 2025-05-22: ingested src.md", "date_str": "2025-05-22"},
+        logs, None,
+    )
+
+    log = (Path(vault.path) / "wiki" / "log.md").read_text(encoding="utf-8")
+    assert log.endswith("- 2026-09-05: ingested src.md\n")
+    assert "2025-05-22" not in log
+
+
+def test_the_log_date_follows_the_source_not_the_run(vault):
+    """196 correct entries take the date off names like
+    'Daily-Chrome-2026-09-05.md', which is usually the day before the run that
+    ingested them. Only an undated source falls back to today."""
+    assert wiki_ingest._log_entry_date("Daily-Chrome-2026-09-05.md") == "2026-09-05"
+    assert wiki_ingest._log_entry_date(
+        "what-is-ax-design-why-do-we-need-this-new-role.md"
+    ) == date.today().isoformat()
 
 
 def test_the_source_filename_is_not_the_models_to_supply(vault):
@@ -662,7 +690,7 @@ def test_read_index_is_dispatchable_in_every_stage(vault):
         wiki_ingest._plan_dispatch(vault.path, wiki_ingest._Plan()),
         wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=False),
         wiki_ingest._execute_dispatch(vault.path, "s.md", "p", counter, exists=True),
-        wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter()),
+        wiki_ingest._log_dispatch(vault.path, wiki_ingest._WriteCounter(), "2026-09-07"),
     )
     for dispatch in stages:
         assert "read_index" in dispatch
@@ -674,7 +702,7 @@ def test_stage_three_read_index_does_not_count_as_a_write(vault):
     vault.index("# Index\n\n## Tools\n\n")
     counter = wiki_ingest._WriteCounter()
 
-    wiki_ingest._log_dispatch(vault.path, counter)["read_index"]()
+    wiki_ingest._log_dispatch(vault.path, counter, "2026-09-07")["read_index"]()
 
     assert counter.count == 0
 
