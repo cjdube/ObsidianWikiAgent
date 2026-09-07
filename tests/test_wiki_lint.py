@@ -130,6 +130,37 @@ def test_check_index_stops_counting_at_the_next_heading(vault):
     assert findings[0].startswith("1 page(s) sit under the index's Unfiled heading (stray)")
 
 
+def test_check_index_reports_two_headings_that_name_one_section(vault):
+    """The real shape, from the live vault 2026-08-26 to 2026-09-07: a hyphen
+    made a second 'AI & Agent Development', and the page under it was stranded
+    while every other check stayed clean."""
+    for slug in ("a", "b"):
+        vault.page(slug, good_page())
+    vault.index(
+        "# Index\n\n## AI & Agent Development\n\n- [[a]] x\n"
+        "\n## AI & Agent-Development\n\n- [[b]] y\n"
+    )
+    findings = wl.check_index(vault.path, wl._pages(vault.path))
+    assert len(findings) == 1
+    assert "index.md has 2 headings for one section" in findings[0]
+    assert "'AI & Agent Development', 'AI & Agent-Development'" in findings[0]
+
+
+def test_check_index_accepts_sections_that_are_genuinely_different(vault):
+    for slug in ("a", "b"):
+        vault.page(slug, good_page())
+    vault.index("# Index\n\n## Tools\n\n- [[a]] x\n\n## Projects\n\n- [[b]] y\n")
+    assert wl.check_index(vault.path, wl._pages(vault.path)) == []
+
+
+def test_check_index_ignores_headings_that_are_not_sections(vault):
+    """'# Index' is the title and '### Sub' is not a section — _section_bounds
+    only recognises '## ', so neither can strand a page."""
+    vault.page("a", good_page())
+    vault.index("# Index\n\n## Tools\n\n### Tools\n\n- [[a]] x\n")
+    assert wl.check_index(vault.path, wl._pages(vault.path)) == []
+
+
 # --- check_source_coverage -------------------------------------------------
 
 

@@ -64,6 +64,9 @@ from agent.wiki_tools import (
 # The ingest's own escaping guard, borrowed rather than re-implemented — see
 # check_escaped_text.
 from agent.wiki_tools import _quotes_outside_json
+# What update_index reads a heading with, and the comparison it makes to decide
+# two spellings name one section — see _index_section_twins.
+from agent.wiki_tools import _section_title, _squash
 from agent.wikilinks import (
     LINK_RE,
     delink_broken,
@@ -189,11 +192,40 @@ def _unfiled_entries(content: str) -> set[str]:
     return names
 
 
+def _index_section_twins(content: str) -> list[str]:
+    """Headings that name one section under different spellings.
+
+    update_index has reused a section that differs only in punctuation since
+    2026-09-07, but a heading typed by hand in Obsidian never goes through it.
+    'AI & Agent-Development' sat beside 'AI & Agent Development' from
+    2026-08-26 to 2026-09-07 holding one stranded page, and no check saw it:
+    every link resolved, nothing was Unfiled, lint reported zero findings.
+    _squash is the comparison update_index itself makes, so the write path and
+    the lint agree on what counts as the same section.
+    """
+    by_squash: dict[str, list[str]] = {}
+    for line in content.splitlines():
+        if (title := _section_title(line)) is not None:
+            by_squash.setdefault(_squash(title), []).append(title)
+    return [
+        f"index.md has {len(titles)} headings for one section: "
+        f"{', '.join(repr(t) for t in titles)}. Only the first one receives "
+        f"pages, so the rest strand whatever sits under them — keep the first, "
+        f"move those pages below it, and delete the spare headings."
+        for _, titles in sorted(by_squash.items())
+        if len(titles) > 1
+    ]
+
+
 def check_index(vault_path: str, pages: dict[str, str]) -> list[str]:
     """Index completeness in both directions, plus the Unfiled backlog.
 
     update_index guarantees every page is listed, but it never prunes links to
     pages that were deleted.
+
+    Section twins are checked here for the same reason as Unfiled: this is the
+    only check that reads the index, and a second heading for one section is
+    invisible to every other one.
 
     Unfiled is counted here because nothing else watches it. _normalize_index
     recomputes that heading on every update_index call, so deleting a section
@@ -215,6 +247,7 @@ def check_index(vault_path: str, pages: dict[str, str]) -> list[str]:
         f"deleted and the index entry left behind; remove the entry."
         for name in sorted(linked - set(pages))
     ]
+    findings += _index_section_twins(content)
     if unfiled := _unfiled_entries(content):
         shown = sorted(unfiled)
         listed = ", ".join(shown[:5])
