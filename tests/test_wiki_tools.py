@@ -1557,6 +1557,42 @@ def test_update_index_files_a_page_named_in_the_case_the_plan_used(vault):
     assert "## Daily Logs" in index
 
 
+def test_update_index_reuses_a_section_that_differs_only_in_punctuation(vault):
+    """A plan naming 'AI & Agent-Development' must file under the existing
+    'AI & Agent Development', not open a second section beside it.
+
+    _section_bounds ignores case but not punctuation, so the learnings vault
+    carried both headings from 2026-08-26 to 2026-09-07 with one page stranded
+    under the hyphenated one. Nothing reported it: every link resolved, nothing
+    was Unfiled, and the lint stayed clean — a near-duplicate heading is not
+    broken, it just splits the map the index exists to be."""
+    vault.page("agent-loops", "# Agent Loops\n\n**Summary**: s.\n")
+    vault.page("rtk-ai", "# RTK AI\n\n**Summary**: s.\n")
+    wt.update_index(vault.path, "agent-loops", "AI & Agent Development")
+
+    result = wt.update_index(vault.path, "rtk-ai", "AI & Agent-Development")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert index.count("## AI & Agent") == 1, index
+    # The index's own spelling wins — 270 entries already sit under it.
+    assert "## AI & Agent Development" in index
+    assert result["section"] == "AI & Agent Development"
+    assert "- [[rtk-ai]]" in index
+
+
+def test_update_index_still_opens_a_genuinely_new_section(vault):
+    """The reuse must not swallow a section the vault really lacks."""
+    vault.page("agent-loops", "# Agent Loops\n\n**Summary**: s.\n")
+    vault.page("product-strategy", "# Product Strategy\n\n**Summary**: s.\n")
+    wt.update_index(vault.path, "agent-loops", "AI & Agent Development")
+
+    wt.update_index(vault.path, "product-strategy", "Product Management")
+
+    index = (vault.root / "wiki" / "index.md").read_text()
+    assert "## AI & Agent Development" in index
+    assert "## Product Management" in index
+
+
 def test_update_index_files_a_page_a_human_named_with_capitals(vault):
     # The other direction of the same mismatch: the tools lower-case, but a
     # person adding a page in Obsidian does not, and on a case-insensitive

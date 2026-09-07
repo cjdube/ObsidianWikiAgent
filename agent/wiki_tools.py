@@ -1287,6 +1287,30 @@ def update_index(vault_path: str, page: str, section: str) -> dict:
 
     bounds = _section_bounds(lines, section)
     if bounds is None:
+        # Before inventing a heading, check whether the index already has this
+        # one spelled differently. _section_bounds ignores case but not
+        # punctuation, so 'AI & Agent-Development' missed 'AI & Agent
+        # Development' and the vault grew a second section holding one page —
+        # unnoticed from 2026-08-26 to 2026-09-07, because a near-duplicate
+        # heading is not broken enough for any check to report: every link
+        # resolves, nothing is Unfiled, and the lint stays clean. It splits the
+        # map Wren reads, which is the one thing the index is for.
+        #
+        # _squash is the same comparison search_wiki_pages uses to see through
+        # the ways one name gets spelled. Adopt the index's own spelling, not
+        # the plan's: the heading that is already there is the one 270 entries
+        # sit under.
+        wanted = _squash(section)
+        existing = next(
+            (t for t in (_section_title(ln) for ln in lines)
+             if t is not None and _squash(t) == wanted),
+            None,
+        )
+        if existing is not None:
+            section = existing
+            bounds = _section_bounds(lines, section)
+
+    if bounds is None:
         # A new section goes before Unfiled, which always stays last.
         unfiled_at = next(
             (i for i, ln in enumerate(lines) if ln.strip() == UNFILED_HEADING),
