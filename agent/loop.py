@@ -162,18 +162,50 @@ def _clip_values(payload: dict) -> dict:
     return {k: _clip(v) if isinstance(v, str) else v for k, v in payload.items()}
 
 
+def _unknown_tool_message(fn_name: str, tools: Optional[list[dict]]) -> str:
+    """What to say about a tool call naming something this stage does not have.
+
+    Named tools, because a model told only "no" sends the same call again. The
+    2026-09-07 plan stage guessed read_wiki_page — a real tool, deliberately
+    withheld from stage 1 so page bodies stay out of planning — then retried it
+    verbatim and reached submit_plan on iteration 11 of 14. The same stage had
+    guessed read_page before that. Both are answered by naming what is on offer,
+    which is also the habit the tool refusals here already keep: say what is
+    wrong and name the fix.
+
+    From `tools`, the advertised schemas, and never from the dispatch keys.
+    read_index and update_index are dispatchable in every ingest stage while
+    advertised in none (see wiki_ingest._plan_dispatch), and listing them here
+    would advertise them through the back door — read_index in particular
+    returns a whole table of contents that grows with the vault, which is the
+    cost QUERY_TOOL_SCHEMAS and the ingest stages both exist to keep out.
+    """
+    names = [
+        name for t in tools or []
+        if (name := t.get("function", {}).get("name"))
+    ]
+    if not names:
+        return f"unknown tool '{fn_name}'"
+    return (
+        f"unknown tool '{fn_name}' — this step was not given it. Do not send "
+        f"the same call again. The tools you can call here are: "
+        f"{', '.join(names)}."
+    )
+
+
 def _dispatch_tool(
     fn_name: str,
     fn_args: dict,
     dispatch: dict[str, Callable[..., dict]],
     logger: Optional[logging.Logger],
+    tools: Optional[list[dict]] = None,
 ) -> dict:
     """Run one tool call and return its result dict. Never raises: a failing
     tool is reported back to the model as an error result so it can recover,
     rather than killing the run."""
     fn = dispatch.get(fn_name)
     if fn is None:
-        result = {"error": f"unknown tool '{fn_name}'"}
+        result = {"error": _unknown_tool_message(fn_name, tools)}
     else:
         try:
             params = inspect.signature(fn).parameters
@@ -800,7 +832,7 @@ def _run_ollama(
             if truncated:
                 result = _truncated_call(fn_name, logger, cap)
             else:
-                result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
+                result = _dispatch_tool(fn_name, fn_args, dispatch, logger, tools)
             # tool_name matters once a turn carries several calls: without it
             # the model gets an ordered list of unlabelled results and has to
             # infer which is which. The Gemini path has always named them.
@@ -933,7 +965,7 @@ def _run_gemini(
             if truncated:
                 result = _truncated_call(fn_name, logger, cap)
             else:
-                result = _dispatch_tool(fn_name, fn_args, dispatch, logger)
+                result = _dispatch_tool(fn_name, fn_args, dispatch, logger, tools)
             responses.append(
                 {"functionResponse": {"name": fn_name, "response": result}}
             )

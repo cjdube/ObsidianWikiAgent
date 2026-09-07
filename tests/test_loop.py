@@ -46,6 +46,37 @@ def test_dispatch_unknown_tool():
     assert result == {"error": "unknown tool 'nope'"}
 
 
+def test_unknown_tool_names_the_tools_this_step_does_have():
+    """A model told only "no" sends the same call again — the 2026-09-07 plan
+    stage retried read_wiki_page verbatim before falling back to search. Naming
+    what is on offer is what stops the second attempt."""
+    schemas = [
+        {"function": {"name": "search_wiki_pages"}},
+        {"function": {"name": "submit_plan"}},
+    ]
+    error = loop._dispatch_tool("read_wiki_page", {}, {}, None, schemas)["error"]
+
+    assert "read_wiki_page" in error
+    assert "search_wiki_pages" in error and "submit_plan" in error
+    assert "same call again" in error
+
+
+def test_unknown_tool_never_names_an_unadvertised_tool():
+    """read_index is dispatchable in every ingest stage and advertised in none.
+    Listing the dispatch here would advertise it through the back door, and its
+    result is a table of contents sized by the vault."""
+    error = loop._dispatch_tool(
+        "read_page",
+        {},
+        {"search_wiki_pages": lambda **kw: {}, "read_index": lambda **kw: {}},
+        None,
+        [{"function": {"name": "search_wiki_pages"}}],
+    )["error"]
+
+    assert "search_wiki_pages" in error
+    assert "read_index" not in error
+
+
 def test_dispatch_tool_exception_is_caught():
     def boom(**kwargs):
         raise RuntimeError("kaboom")
