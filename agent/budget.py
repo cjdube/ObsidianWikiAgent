@@ -10,9 +10,12 @@ talking to that Ollama.
 
 Nothing in the retry path noticed, because every individual wait was
 reasonable. The damage is in the product: OLLAMA_TIMEOUT (300s by default, set
-to 600 in config/.env) x _MAX_HTTP_ATTEMPTS (5) x MAX_INGEST_ITERATIONS (30) x
-MAX_INGEST_ATTEMPTS (3) x every pending source. So a run is bounded twice over — by wall clock for
-the whole process, and by transport retries per source.
+to 600 in config/.env) x _MAX_HTTP_ATTEMPTS (5) x the stage's iteration cap x
+MAX_INGEST_ATTEMPTS (3) x every pending source. The ingest had one cap of 30
+when this was written; it now caps each stage separately — MAX_PLAN_ITERATIONS
+(14), MAX_EXECUTE_ITERATIONS (12), MAX_LOG_ITERATIONS (4) — which lowers the
+worst case without changing the shape of it. So a run is bounded twice over — by
+wall clock for the whole process, and by transport retries per source.
 
 Both limits are process-global rather than parameters threaded through the
 call chain, because both are properties of "this run" and not of any single

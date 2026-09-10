@@ -65,11 +65,13 @@ The follow-up run took 5m34s with no truncation, retries, or new lint findings; 
 
 Stage-2 concurrency was declined on 2026-08-22 because aggregate throughput did not improve under the current Ollama configuration and the local model slot is shared. Any renewed proposal starts with a current benchmark, not a concurrency implementation.
 
-### Execute-stage link scope — Watch
+### Execute-stage link scope — Resolved
 
 Each execute conversation can link only to sibling page names in its source plan. It does not receive `list_wiki_pages`; the plan stage must include an existing page when a new page needs a backlink. Later sources still see pages created by earlier sources because planning reads the directory from disk.
 
-The 2026-08-21 baseline was 419 pages and two orphans (`knowledge-graph-architecture.md` and `opaque-identifiers.md`) with no new broken links in the staged end-to-end run. The intended recheck date was 2026-08-28. Recompute the current baseline with `.venv/bin/python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --json` before proposing a wider plan prompt. Widen it only if current orphan growth shows the narrow scope is insufficient.
+The 2026-08-21 baseline was 419 pages and two orphans (`knowledge-graph-architecture.md` and `opaque-identifiers.md`). Rechecked 2026-09-10: 574 pages, zero orphans, zero broken or self links. The vault grew 37 percent while orphans fell to none, so the narrow scope is sufficient and this is closed.
+
+The guardrail survives the closure: do not widen the plan prompt's link scope without a fresh number. Recompute with `.venv/bin/python wiki_lint.py --vault ~/Vaults/llm-wiki-learnings --json` and show orphan growth first. Invented links are damage; missing links are lintable, and this measurement is why that trade is still the right one.
 
 ### Escaped JSON text — Resolved
 

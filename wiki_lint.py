@@ -4,8 +4,11 @@ Report-only by default: without --fix it never writes to the vault. RULES.md
 asks for "findings as a numbered list with suggested fixes", and the fixes
 that matter need a human — deciding which of two overlapping pages survives is
 judgment, not mechanics. The opt-in --fix flag applies only the provably-safe,
-mechanical subset (stripping self-links, de-linking dead index entries) and
-leaves every judgment call untouched.
+mechanical subset — stripping self-links, de-linking dead index entries, and
+decoding escaped text back into the prose it damaged — and leaves every
+judgment call untouched. The third one rewrites the body of a page a human
+wrote, so it is the one to know about before you pass --fix; see
+apply_safe_fixes for what "provably safe" means for each.
 
 Two passes, split by what each is actually good at:
 

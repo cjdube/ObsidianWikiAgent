@@ -858,8 +858,10 @@ def _gemini_key() -> str:
 def _gemini_timeout() -> int:
     """Seconds to wait on one Gemini call. The Ollama path has honoured
     OLLAMA_TIMEOUT all along while this one took _post_with_retry's hardcoded
-    120 — and the slowest call in the repo is the --deep judgment pass, which
-    reads the whole index."""
+    120 — and the slowest work in the repo is the --deep judgment pass, which
+    can spend up to MAX_DEEP_ITERATIONS calls searching before it reports. Each
+    of those calls is bounded (QUERY_TOOL_SCHEMAS offers no read_index, and
+    read_wiki_page refuses index.md); it is the number of them that is large."""
     return int(os.getenv("GEMINI_TIMEOUT", "120"))
 
 

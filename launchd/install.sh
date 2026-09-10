@@ -35,7 +35,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --name) NAME="${2:?--name needs a value}"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
-        -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        # Through 21, not 20: the header's last line carries the kickstart
+        # command, which is the one thing a reader needs *after* installing.
+        -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*) echo "unknown option: $1" >&2; exit 2 ;;
         *) if [ -z "$VAULT" ]; then VAULT="$1"; else jobs+=("$1"); fi; shift ;;
     esac
