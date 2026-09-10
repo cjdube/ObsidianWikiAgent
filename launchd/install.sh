@@ -67,7 +67,9 @@ if [ ! -x "$ROOT/.venv/bin/python" ]; then
     exit 1
 fi
 
-# lint is opt-in: it is the one job that can send vault contents to Gemini.
+# lint is opt-in: a weekly audit only earns its keep on a vault too big to read
+# through by hand. It set LLM_PROVIDER=gemini until 2026-09-10, which used to be
+# the reason; the warning below now covers whoever puts it back.
 [ ${#jobs[@]} -gt 0 ] || jobs=(ingest snapshot)
 
 mkdir -p "$AGENTS" "$ROOT/logs"

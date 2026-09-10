@@ -7,14 +7,13 @@ against a **local LLM served by Ollama** and send nothing off the box.
 There is one opt-in exception, and it is worth knowing about before you put
 anything private in a vault: setting `LLM_PROVIDER=gemini` routes that run to
 Google's API instead, which means the vault pages and raw sources it reads
-leave your machine. The default is Ollama, and every scheduled job you get by
-default stays on it. One tracked file is the exception:
-`launchd/template-lint.plist.txt` ships `LLM_PROVIDER=gemini`, because the
-weekly lint job's judgment pass is where model quality decides whether the
-findings are worth reading (see step 6 below). Nothing installs that job unless
-you name it — `./launchd/install.sh <vault>` with no job named installs
-`ingest` and `snapshot` only. Ask for `lint` and you have configured a job that
-sends vault content to a third party every week, so decide that on purpose.
+leave your machine. The default is Ollama and nothing in this repo picks
+Gemini for you — no plist template in `launchd/` sets `LLM_PROVIDER`, so every
+scheduled job you install stays local until you edit one yourself. The weekly
+lint template shipped `LLM_PROVIDER=gemini` until 2026-09-10; it now documents
+the two lines to add instead, and `install.sh` prints a warning naming the
+provider whenever a job it generates carries one. See SECURITY.md before you
+turn it on.
 
 Vault-agnostic by design: the script has no idea what subject any given
 vault covers. Every vault supplies its own `RULES.md` (folder structure,
@@ -365,15 +364,15 @@ Once a vault is set up and scheduled, this is the actual workflow:
    `./launchd/install.sh <vault-path> lint` fills in
    `launchd/template-lint.plist.txt` and loads the job. `lint` has to be asked
    for by name — `install.sh` with no job named installs `ingest` and
-   `snapshot` only — because this is the one template that ships
-   `LLM_PROVIDER=gemini`.
+   `snapshot` only — because the audit is only worth scheduling once a vault
+   has grown past the point where reading every page by hand is realistic.
    The setup this was built against runs Sunday 10:00, after that morning's
    ingest, and lands its report in `logs/<vault-name>-lint.launchd.log`. The
-   provider is set there because the judgment pass is where model quality
-   decides whether the findings are worth reading — and it is the one place
-   vault content leaves the machine. Drop the two `LLM_PROVIDER` lines from
-   your generated plist to audit locally instead. The daily ingests stay on the
-   local default.
+   template sets no provider, so this pass runs on the local model like
+   everything else. It is still the one job where model quality decides
+   whether the findings are worth reading, and so the one worth pointing at a
+   cloud model on purpose: the template names the two lines to add, and
+   `install.sh` warns you when it finds them.
 
    The prose report is for a human; alongside it the run is logged through
    `setup_logger` like the ingest and snapshot jobs are — run boundaries,
@@ -440,8 +439,9 @@ vault has a git remote. Name the jobs explicitly to add the weekly lint:
 ./launchd/install.sh ~/Vaults/<vault-name> ingest lint snapshot
 ```
 
-`lint` is opt-in rather than default because it is the one job whose template
-sets `LLM_PROVIDER=gemini`, so the pages it reads leave the machine.
+`lint` is opt-in rather than default because a weekly audit only earns its
+keep once a vault is too big to read through by hand. Like the other two
+templates it sets no `LLM_PROVIDER`, so it runs on the local model.
 
 Nothing runs at install time — every template ships `RunAtLoad` false, so the
 first run is on schedule. To fire one now:

@@ -109,7 +109,7 @@ Two conclusions:
 1. The cap, not model quality, was the binding constraint. `MAX_DEEP_ITERATIONS` in [`wiki_lint.py`](../wiki_lint.py) was raised to 120 on the strength of this. Historical production runs used 41-56 of 60, so the headroom was already thin before the vault reached this size; remeasure as it grows.
 2. Neither provider found two of the four defects in any of the twelve runs, including one on a page the local model had opened. The pass samples the vault, it does not sweep it, so a clean judgment report is not evidence that the vault is clean.
 
-The provider itself was not changed. `LLM_PROVIDER=gemini` in the weekly lint plist remains the deliberate privacy opt-in described in [`SECURITY.md`](../SECURITY.md).
+The provider was changed afterwards, on 2026-09-10: [`launchd/template-lint.plist.txt`](../launchd/template-lint.plist.txt) no longer sets `LLM_PROVIDER`, so an installed lint job inherits the local default like the daily ingest. The reason is not the recall numbers above — by those Gemini is the better auditor, 4 of 12 against 2 of 12 — but that a tracked template is a shipped default, and a shipped default should not route a stranger's vault off their machine on the first `install.sh`. The opt-in itself is unchanged and still described in [`SECURITY.md`](../SECURITY.md); the template documents the two lines to add, and `install.sh` prints a warning naming the provider when a generated plist carries one. Anyone weighing that trade should read the 4-of-12 figure first: local is a working audit, not an equal one.
 
 ## End-to-end verification
 
