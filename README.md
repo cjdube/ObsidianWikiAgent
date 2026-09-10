@@ -553,6 +553,22 @@ on someone opening a log. Set `NTFY_URL` (and usually `NTFY_TOKEN`) in
 Leaving `NTFY_URL` unset switches push off; runs still log and still exit
 non-zero. Delivery is best-effort and never masks the failure it reports.
 
+A run can also finish cleanly while individual pages did not. Stage 2 gives each
+page a fixed number of turns, and a page that spends them all is saved with an
+`[incomplete: hit max_iterations=12 ...]` marker — the agent stopped
+mid-thought. That is not an alert-worthy failure, so nothing tells you; it shows
+up only as a slightly worse page. To count them:
+
+```bash
+.venv/bin/python tools/measure_stage2.py --vault <vault-name>
+```
+
+`tools/` holds read-only analysis over the logs the jobs already write. Nothing
+there is scheduled and nothing there writes to a vault. This one exists because
+the number has to be recomputed against the current log, and rebuilding the
+parser each time is how a measurement quietly changes definition between two
+runs meant to be compared.
+
 ## Running the tests
 
 Deterministic unit tests cover the file I/O, path safety and reserved-name
