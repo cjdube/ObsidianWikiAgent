@@ -866,6 +866,30 @@ def _heading_like(section: str) -> bool:
     )
 
 
+def _smuggled_heading(content: str) -> str | None:
+    """The first '## ' heading inside `content`, or None if there is none.
+
+    edit_wiki_page files content under the section its caller names, verbatim.
+    A '## ' line inside that content therefore starts a second section — and
+    because _append_to_section puts a section it cannot find in front of
+    '## Related pages', the new one lands mid-page rather than at the end. That
+    is how wiki/wren.md reached four '## Related pages' headings: 21 accepted
+    calls across the live ingest log carried one, the last on 2026-09-09, and
+    every one of them was '## Related pages'.
+
+    A fenced line does not count. No call in the log has ever put a heading in
+    a code fence, but RULES.md documents the page format inside one, so a
+    source quoting it would otherwise be refused for writing what it meant to.
+    """
+    fenced = False
+    for line in content.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and _section_title(line) is not None:
+            return line[3:].strip()
+    return None
+
+
 def _append_to_section(body: str, section: str, content: str) -> str:
     """`body` with `content` added at the end of `section`, creating it if new.
 
@@ -1036,6 +1060,18 @@ def edit_wiki_page(
             "error": f"'{section[:40]}…' is page content, not a section "
                      f"heading. Pass a short heading like 'Context Management' "
                      f"as 'section', and put the material in 'content'."
+        }
+
+    heading = _smuggled_heading(content)
+    if heading:
+        return {
+            "error": f"content carries its own '## {heading}' heading. This "
+                     f"tool files content under the heading named in "
+                     f"'section', so that line would open a second "
+                     f"'{heading}' section in the middle of the page. Send "
+                     f"only the material that belongs under '{section}', with "
+                     f"no heading line. Material for '{heading}' is a "
+                     f"separate call with section='{heading}'."
         }
 
     body = _append_to_section(body, section, content)

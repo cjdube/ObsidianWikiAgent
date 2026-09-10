@@ -1341,6 +1341,79 @@ def test_unchanged_tells_the_model_not_to_resend_the_call(vault):
     assert "stop" in reason
 
 
+def test_edit_wiki_page_refuses_content_that_carries_its_own_heading(vault):
+    """The real call from the 2026-09-09 live run, shortened. It asked for the
+    'Hardening' section and put a '## Related pages' heading in the content, so
+    wren.md gained a fourth Related pages list in the middle of the page. 21
+    calls across the live log did this and every one was accepted."""
+    vault.page(
+        "wren",
+        "# Wren\n\n**Sources**: a.md\n**Last updated**: 2026-08-01\n\n"
+        "## Hardening\n\n- Old.\n\n## Related pages\n\n- [[agentos]]\n",
+    )
+
+    result = wt.edit_wiki_page(
+        vault.path,
+        "b.md",
+        "wren",
+        "Hardening",
+        "- **Settings Management**: A central settings system.\n\n"
+        "## Related pages\n\n- [[daily-work-2026-09-08]]",
+    )
+
+    assert "error" in result
+    # Names the heading it found, so the model knows which line to drop...
+    assert "Related pages" in result["error"]
+    # ...and what to do with that material instead, the way the 'unchanged'
+    # reason does — a bare refusal is the thing that makes this model retry.
+    assert "separate call" in result["error"]
+    # Nothing was written: still one Related pages, and no new bullet.
+    page = (vault.root / "wiki" / "wren.md").read_text()
+    assert page.count("## Related pages") == 1
+    assert "Settings Management" not in page
+
+
+def test_edit_wiki_page_allows_a_heading_inside_a_code_fence(vault):
+    """RULES.md documents the page format in a fenced block that contains
+    '## Related pages'. A source quoting it is writing an example, not opening
+    a section, so the guard above must not refuse it."""
+    vault.page(
+        "rules-notes",
+        "# Rules Notes\n\n**Sources**: a.md\n**Last updated**: 2026-08-01\n\n"
+        "## Format\n\n- Old.\n",
+    )
+
+    result = wt.edit_wiki_page(
+        vault.path,
+        "b.md",
+        "rules-notes",
+        "Format",
+        "- Every page ends with the list:\n\n```markdown\n"
+        "## Related pages\n\n- [[a]]\n```",
+    )
+
+    assert "edited" in result
+    assert "## Related pages" in (vault.root / "wiki" / "rules-notes.md").read_text()
+
+
+def test_edit_wiki_page_still_accepts_a_subsection_in_content(vault):
+    """Only '## ' opens a section — _section_bounds says so — so a '### ' line
+    is ordinary content and stays allowed. Narrowing this to level two is the
+    whole point: pages do carry subsections."""
+    vault.page(
+        "qwen",
+        "# Qwen\n\n**Sources**: a.md\n**Last updated**: 2026-08-01\n\n"
+        "## Notes\n\n- Old.\n",
+    )
+
+    result = wt.edit_wiki_page(
+        vault.path, "b.md", "qwen", "Notes", "### Benchmarks\n\n- Fast."
+    )
+
+    assert "edited" in result
+    assert "### Benchmarks" in (vault.root / "wiki" / "qwen.md").read_text()
+
+
 def test_unchanged_still_counts_as_a_write_not_an_error(vault):
     """_counted in wiki_ingest.py increments on any result without an 'error'
     key, and that is right: the content is on the page. Wording the reason more
