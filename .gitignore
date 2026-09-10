@@ -26,3 +26,8 @@ launchd/*.plist.tmp
 # Claude Code local state: per-machine permissions, scratch worktrees. Only a
 # machine-global ignore was covering these, which doesn't survive a clone.
 .claude/
+
+# Review write-ups. These are point-in-time notes about the repo, not part of
+# the repo's contract, and they name a vault's page counts. Kept on disk for
+# reading; not tracked.
+docs/reviews/
