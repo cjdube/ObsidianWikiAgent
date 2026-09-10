@@ -175,8 +175,8 @@ function takes `vault_path` explicitly, so the same functions serve any
 vault. The OpenAI-style tool schemas passed to `run_agent` live here too, one
 list per job rather than one list for everything: `PLAN_TOOL_SCHEMAS`,
 `CREATE_PAGE_TOOL_SCHEMAS`, `UPDATE_PAGE_TOOL_SCHEMAS` and `LOG_TOOL_SCHEMAS`
-for the three ingest stages, and `QUERY_TOOL_SCHEMAS` for the read side. Nine
-distinct tools across the ingest, and no stage sees all nine.
+for the three ingest stages, and `QUERY_TOOL_SCHEMAS` for the read side. Eight
+distinct tools across the ingest, and no stage sees all eight.
 
 Stage 2 having two lists is the point, not a convenience. Which one a unit gets
 is decided by whether its page is already on disk — not by what the plan called

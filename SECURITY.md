@@ -60,11 +60,11 @@ landing outside `<vault>/wiki` and `<vault>/raw`. Both are tested directly
 against `../`, `../../etc/passwd` and absolute paths; because they compare
 against `.resolve()`d paths, a symlink pointing out of the vault is caught by
 the same check. The exposed tools are all vault file I/O — no shell, no
-network, and no path argument that bypasses those two guards. (Nine distinct
+network, and no path argument that bypasses those two guards. (Eight distinct
 tools are advertised across the three ingest stages — `PLAN_TOOL_SCHEMAS`,
 `CREATE_PAGE_TOOL_SCHEMAS`, `UPDATE_PAGE_TOOL_SCHEMAS` and `LOG_TOOL_SCHEMAS`
-in `agent/wiki_tools.py`. No stage sees all nine; each is offered only what its
-one job needs. Each ingest stage's dispatch resolves a tenth, `read_index`,
+in `agent/wiki_tools.py`. No stage sees all eight; each is offered only what its
+one job needs. Each ingest stage's dispatch resolves a ninth, `read_index`,
 which is deliberately callable-but-unadvertised so a vault's `RULES.md` naming
 it in prose still works. It is a read, and it is inside the same guards. The
 read-only side — `wiki_query.py` and the lint judgment pass, both on

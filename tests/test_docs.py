@@ -72,6 +72,64 @@ def test_privacy_docs_do_not_claim_the_templates_are_provider_free(doc):
         assert stale not in text, f"{doc} still says: {stale!r}"
 
 
+_NUMBER_WORDS = {
+    6: "Six", 7: "Seven", 8: "Eight", 9: "Nine", 10: "Ten", 11: "Eleven",
+}
+
+_INGEST_SCHEMA_LISTS = (
+    "PLAN_TOOL_SCHEMAS",
+    "CREATE_PAGE_TOOL_SCHEMAS",
+    "UPDATE_PAGE_TOOL_SCHEMAS",
+    "LOG_TOOL_SCHEMAS",
+)
+
+
+def _advertised_ingest_tools() -> set[str]:
+    from agent import wiki_tools
+
+    names: set[str] = set()
+    for list_name in _INGEST_SCHEMA_LISTS:
+        names |= {
+            schema["function"]["name"] for schema in getattr(wiki_tools, list_name)
+        }
+    return names
+
+
+@pytest.mark.parametrize("doc", ("SECURITY.md", "README.md"))
+def test_privacy_docs_count_the_advertised_ingest_tools_correctly(doc):
+    """Both files tell the reader how many tools the model can reach, and that
+    number is the only part of the paragraph a reader can check. It was
+    'Nine' against eight advertised tools, which is how you find out the list
+    was never re-counted against the code.
+
+    Spelled out rather than matched loosely on purpose: a tool added to any of
+    the four schema lists must fail this until the prose is re-counted."""
+    count = len(_advertised_ingest_tools())
+    assert count in _NUMBER_WORDS, f"add {count} to _NUMBER_WORDS"
+    word = _NUMBER_WORDS[count]
+
+    # Both files hard-wrap their prose, so the claim routinely straddles a line
+    # break ("Eight distinct\ntools"). Match on the unwrapped text.
+    text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
+    assert f"{word} distinct tools" in text or f"{word.lower()} distinct tools" in text, (
+        f"{count} tools are advertised across {', '.join(_INGEST_SCHEMA_LISTS)}, "
+        f"but {doc} does not say '{word} distinct tools'"
+    )
+
+
+def test_read_index_is_dispatchable_but_never_advertised():
+    """The docs call read_index the one callable-but-unadvertised tool, so it
+    is the tool after the advertised ones — a ninth, not a tenth. That only
+    holds while it stays out of every schema list."""
+    assert "read_index" not in _advertised_ingest_tools()
+
+    from agent import wiki_tools
+
+    assert "read_index" not in {
+        schema["function"]["name"] for schema in wiki_tools.QUERY_TOOL_SCHEMAS
+    }
+
+
 def test_readme_agrees_with_the_lint_template_existing():
     """README used to send a reader to copy launchd/template.plist.txt for the
     audit job, in a repo that has a template-lint.plist.txt and an install.sh
