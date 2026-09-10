@@ -7,11 +7,14 @@ against a **local LLM served by Ollama** and send nothing off the box.
 There is one opt-in exception, and it is worth knowing about before you put
 anything private in a vault: setting `LLM_PROVIDER=gemini` routes that run to
 Google's API instead, which means the vault pages and raw sources it reads
-leave your machine. Nothing here turns it on: the default is Ollama, and no
-plist template in `launchd/` sets it. It is a per-run or per-job opt-in you
-have to make yourself — worth knowing up front because the weekly lint job is
-where it is tempting (see step 6 below), and a scheduled job you configure that
-way sends vault content to a third party every week.
+leave your machine. The default is Ollama, and every scheduled job you get by
+default stays on it. One tracked file is the exception:
+`launchd/template-lint.plist.txt` ships `LLM_PROVIDER=gemini`, because the
+weekly lint job's judgment pass is where model quality decides whether the
+findings are worth reading (see step 6 below). Nothing installs that job unless
+you name it — `./launchd/install.sh <vault>` with no job named installs
+`ingest` and `snapshot` only. Ask for `lint` and you have configured a job that
+sends vault content to a third party every week, so decide that on purpose.
 
 Vault-agnostic by design: the script has no idea what subject any given
 vault covers. Every vault supplies its own `RULES.md` (folder structure,

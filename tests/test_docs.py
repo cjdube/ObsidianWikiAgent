@@ -13,6 +13,8 @@ could check them.
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 LAUNCHD = ROOT / "launchd"
 
@@ -25,31 +27,49 @@ def _templates() -> dict[str, str]:
     return {p.name: p.read_text(encoding="utf-8") for p in LAUNCHD.glob("template*.txt")}
 
 
-def test_security_md_names_every_template_that_sets_a_cloud_provider():
-    """A template that picks a provider is a privacy default shipped in the
-    repo. SECURITY.md must name that file, so the reader knows which job to
-    look at rather than trusting a blanket 'nothing here turns it on'."""
-    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
-
-    setters = {
+def _provider_setters() -> dict[str, str]:
+    """Template filename -> the LLM_PROVIDER it ships, for the ones that set one."""
+    return {
         name: m.group(1)
         for name, text in _templates().items()
         if (m := _PROVIDER.search(text))
     }
+
+
+@pytest.mark.parametrize("doc", ("SECURITY.md", "README.md"))
+def test_privacy_docs_name_every_template_that_sets_a_cloud_provider(doc):
+    """A template that picks a provider is a privacy default shipped in the
+    repo. Both files that make the privacy promise must name that file, so the
+    reader knows which job to look at rather than trusting a blanket 'nothing
+    here turns it on'.
+
+    README is checked alongside SECURITY.md because it is the file a reader
+    meets first, and it carried the stale claim for longer: SECURITY.md was
+    corrected while README's opening paragraph still said no template sets it,
+    four hundred lines above its own paragraph saying one does."""
+    text = (ROOT / doc).read_text(encoding="utf-8")
+
+    setters = _provider_setters()
     assert setters, "expected at least the lint template to set a provider"
 
     for name, provider in setters.items():
-        assert name in security, (
-            f"{name} sets LLM_PROVIDER={provider} but SECURITY.md never names it"
+        assert name in text, (
+            f"{name} sets LLM_PROVIDER={provider} but {doc} never names it"
         )
 
 
-def test_security_md_does_not_claim_the_templates_are_provider_free():
-    """The exact wording that went stale. Kept as its own check because the
-    claim above can be satisfied while a leftover sentence still denies it."""
-    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
-    for stale in ("neither plist template sets it", "Nothing in this repo turns it on"):
-        assert stale not in security
+@pytest.mark.parametrize("doc", ("SECURITY.md", "README.md"))
+def test_privacy_docs_do_not_claim_the_templates_are_provider_free(doc):
+    """The exact wordings that went stale. Kept as its own check because the
+    claim above can be satisfied while a leftover sentence still denies it —
+    which is exactly what README did."""
+    text = " ".join((ROOT / doc).read_text(encoding="utf-8").split())
+    for stale in (
+        "neither plist template sets it",
+        "Nothing in this repo turns it on",
+        "no plist template in `launchd/` sets it",
+    ):
+        assert stale not in text, f"{doc} still says: {stale!r}"
 
 
 def test_readme_agrees_with_the_lint_template_existing():
