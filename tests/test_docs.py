@@ -11,6 +11,8 @@ could check them.
 """
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -137,3 +139,70 @@ def test_readme_agrees_with_the_lint_template_existing():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert (LAUNCHD / "template-lint.plist.txt").is_file()
     assert "there is no lint template" not in readme
+
+
+def test_install_sh_warns_out_loud_when_a_template_sets_a_cloud_provider(tmp_path):
+    """The privacy opt-in has a second door. On 2026-09-03 this machine's lint
+    plist was hand-edited back to the local model, in ~/Library/LaunchAgents
+    only — but install.sh regenerates that file from template-lint.plist.txt,
+    which sets LLM_PROVIDER=gemini. So a later install would have quietly
+    restored the cloud provider. Nothing in the output said so.
+
+    The warning has to name the provider, because 'check your plist' is the
+    instruction that already failed once.
+    """
+    if not (ROOT / ".venv" / "bin" / "python").is_file():
+        pytest.skip("install.sh refuses to run without the venv")
+    if shutil.which("plutil") is None:
+        pytest.skip("plutil is macOS-only, and so is launchd")
+
+    setters = _provider_setters()
+    assert setters, "no template sets LLM_PROVIDER — this guard has nothing to guard"
+
+    vault = tmp_path / "some-vault"
+    vault.mkdir()
+    run = subprocess.run(
+        [str(LAUNCHD / "install.sh"), "--dry-run", str(vault), "ingest", "lint", "snapshot"],
+        capture_output=True, text=True, check=True,
+    )
+    warnings = [ln for ln in run.stdout.splitlines() if "PRIVACY" in ln]
+
+    for name, provider in setters.items():
+        if provider == "ollama":
+            continue
+        assert any(f"'{provider}'" in ln for ln in warnings), (
+            f"{name} ships LLM_PROVIDER={provider}, but install.sh printed no "
+            f"warning naming it. Output was:\n{run.stdout}"
+        )
+
+
+def test_install_sh_reads_the_provider_with_a_parser_not_a_grep(tmp_path):
+    """A commented-out setting is not a setting. This machine's local lint plist
+    kept the two LLM_PROVIDER lines inside an XML comment for a week, so a grep
+    would have reported a cloud provider on a job that ran locally — and a
+    privacy warning that cries wolf gets ignored the one time it is real."""
+    if shutil.which("plutil") is None:
+        pytest.skip("plutil is macOS-only, and so is launchd")
+
+    plist = tmp_path / "commented.plist"
+    plist.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0"><dict>\n'
+        "  <key>EnvironmentVariables</key>\n"
+        "  <dict>\n"
+        "    <!-- <key>LLM_PROVIDER</key><string>gemini</string> -->\n"
+        "    <key>WIKI_LAUNCHD_LOG</key><string>/tmp/x.log</string>\n"
+        "  </dict>\n"
+        "</dict></plist>\n",
+        encoding="utf-8",
+    )
+
+    assert "gemini" in plist.read_text(encoding="utf-8")  # a grep would fire
+    extracted = subprocess.run(
+        ["plutil", "-extract", "EnvironmentVariables.LLM_PROVIDER", "raw", "-o", "-",
+         str(plist)],
+        capture_output=True, text=True,
+    )
+    assert extracted.returncode != 0, "plutil must not see a commented-out key"

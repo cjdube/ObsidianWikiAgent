@@ -89,6 +89,14 @@ plist_value() {
         | sed -e 's/[\\&|]/\\&/g'
 }
 
+# plist_value is for writing a plist; this is for reading one back. plutil, not
+# grep: a hand-edited local plist can leave the LLM_PROVIDER lines inside an XML
+# comment, and a grep cannot tell a setting from a note about one. The parser
+# can, and a privacy warning that cries wolf is a privacy warning nobody reads.
+extract_provider() {
+    plutil -extract EnvironmentVariables.LLM_PROVIDER raw -o - "$1" 2>/dev/null || true
+}
+
 for job in "${jobs[@]}"; do
     case "$job" in
         ingest) template="$ROOT/launchd/template.plist.txt" ;;
@@ -123,6 +131,26 @@ for job in "${jobs[@]}"; do
     if ! plutil -lint "$local_copy.tmp" >/dev/null; then
         echo "error: generated plist is not valid: $local_copy.tmp" >&2
         exit 1
+    fi
+
+    # A cloud provider set here is a privacy boundary: the raw sources and wiki
+    # pages that job reads leave the machine. It arrives from the template, not
+    # from anything the caller typed, so say so out loud — on 2026-09-03 this
+    # vault's lint job was edited to local in $AGENTS only, and the next
+    # install.sh would have put gemini back with no output saying it had.
+    provider="$(extract_provider "$local_copy.tmp")"
+    if [ -n "$provider" ] && [ "$provider" != "ollama" ]; then
+        was="$(extract_provider "$AGENTS/$label.plist")"
+        echo
+        echo "  ***  PRIVACY: $label sends vault content to '$provider'  ***"
+        echo "  Raw sources and wiki pages this job reads leave this machine."
+        echo "  This comes from $(basename "$template"), not from your arguments."
+        if [ "$was" != "$provider" ]; then
+            echo "  It REPLACES an installed job that used '${was:-ollama (the local default)}'."
+        fi
+        echo "  To keep it local: install without the '$job' job, or delete the"
+        echo "  LLM_PROVIDER key from $local_copy and re-run with that job."
+        echo
     fi
 
     # Dry run must not touch $local_copy: re-running with an existing vault's
