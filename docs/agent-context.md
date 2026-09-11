@@ -202,6 +202,51 @@ under a heading of the same name for a repeated block. That is a false finding
 and it is counted as one — the control model's Tier B record is one true
 finding and one false, from two.
 
+**2026-09-11: the judgment pass may list the vault's page names.** The 1.0 of
+12 above is a coverage failure, not a reasoning one — the pass read 29 of 609
+pages, and `LINT_WRAPPER` explicitly told it no page-name tool existed, so its
+searches could not reach what it could not name. `LIST_WIKI_PAGES_SCHEMA` was
+already written in `agent/wiki_tools.py` and wired to nothing. Advertising it to
+the deep lint only, six Tier B trials against the same injected copy:
+
+| | no list tool | list tool |
+|---|---|---|
+| trials | 3 | 6 |
+| recall of 12 | 1.0 | 4.2 |
+| distinct pages read | 29 | 56 |
+| tool calls | 36 | 59 |
+| seconds | 603 | 964 |
+
+The gain is coverage. Roughly twice the pages read gives roughly four times the
+planted defects, at about 60% more wall clock — well inside
+`DEEP_RUN_BUDGET_MINUTES = 30`, though the worst single trial reached 1,468s of
+that 1,800s budget. Per-trial recall stays noisy: 6, 3, 5, 3, 3, 5 against a
+baseline of 1, 1, 1. Treat 4.2 as "about four", not as a precise figure.
+
+This deviates from the AGENTS.md rule against vault-sized tool results, so the
+exception is written into AGENTS.md rather than left in code. The measured
+reason it is safe: a bare name list is 12.7 KB, 4.9% of a 65,536-token window at
+609 pages, where the index with summaries is 90.8 KB and 35%. The 8 KB result
+cap that made the original incident silent belongs to LocalLLMAgent, not this
+repo. Watch the name list against the window as the vault grows.
+
+**The list tool overflowed the context, and `OLLAMA_NUM_CTX` is now 131072.**
+The first three list-tool trials ran at 65536 and peaked at **113%**. Ollama
+does not fail on overflow; it drops the oldest messages, so the best-scoring
+trial of the three wrote its report after silently losing RULES.md and its lint
+instructions. The cause is the extra page reads, not the 3,200-token name list.
+Raising `config/.env` to 131072 put the same run at 42%, 27% and 35% peak fill
+with no overflow warning. `qwen3.8:27b-mlx` loads at 131072 and stays **100%
+GPU** on the 48 GB box at 18 GB resident, checked with `ollama ps`, even with
+`gemma4:26b-mlx` resident alongside it. `config/.env` is not tracked, so a
+checkout that keeps the 32768 code default will overflow on this path; that is
+why the number is written here and in the `wiki_lint.py` comment.
+
+False findings in the six list-tool trials are **not** counted. The reports are
+saved at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
+`/tmp/lint-ctx131k/reports` until the box is rebooted; counting them is a human
+task and the recall numbers above say nothing about precision.
+
 The model is set per job, not globally.
 [`launchd/template-lint.plist.txt`](../launchd/template-lint.plist.txt)
 documents the `OLLAMA_MODEL` lines and the numbers but does not ship them, for
