@@ -393,10 +393,27 @@ Consequences, all landed together:
 
 569 pages, 12 findings, 0 unreadable, read by hand: 2 pages genuinely out of
 scope, 2 in-scope pages carrying banned text, 3 judgment calls, 5 noise. One
-flag per 47 pages, which is still a readable weekly report. The noise has one
-shape — the model reaches for "Enterprise productivity administration that
-teaches no reusable lesson" for any infrastructure page, and that RULES line
-was written about someone else's SharePoint.
+flag per 47 pages, which is still a readable weekly report.
+
+All five noise flags came from a single RULES line — "Enterprise productivity
+administration that teaches no reusable lesson (e.g. tracking someone else's
+SharePoint or M365 tenant)". The model read "administration" as
+"configuration" and applied it to any infrastructure page, overriding the two
+inclusions that already covered them. The line was written about an employer's
+tenant and never said so: it named the activity and left out the only thing
+that decides the question, which is *whose* systems the page is about. The
+learnings vault rewrote it to say that (`a404716` in the vault repo).
+
+Re-swept the same nine pages against the new wording: 5 false flags went clean,
+both true findings still fire. Two off-brief flags were lost with them —
+`ai-chat-learnings-2026-08-18` and `daily-chrome-2026-08-16` have in-scope
+subjects and merely *contain* banned text, and the sweep only ever asks about
+the subject, so it had been catching them by over-reaching. Banned text is a
+grep, not a model call. One sample of nine, and borderline pages flip.
+
+**The lesson generalises past this vault.** An exclusion that names an activity
+will be read against every page that performs that activity. Name the boundary
+the exclusion actually turns on, and say which inclusions outrank it.
 
 The same run's judgment pass read 21 of 569 pages and reported "Out-of-scope
 pages: None found", having searched for the banned words and got zero hits. The
