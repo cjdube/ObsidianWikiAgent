@@ -179,8 +179,8 @@ it was done. A model cannot compare two pages it never opened together, which
 is exactly why the one-page defects are the ones that survive at this size.
 Raising a cap does not address this.
 
-False findings in those three trials have not been counted. The one-true,
-one-false record described below is from the single trials only.
+False findings in those three trials are counted below, under "Precision was
+hand-counted".
 
 `wiki_lint.py` now reports that share rather than leaving it to be hand-counted:
 `_coverage_line` ends every judgment pass with the distinct pages it read, the
@@ -242,10 +242,52 @@ GPU** on the 48 GB box at 18 GB resident, checked with `ollama ps`, even with
 checkout that keeps the 32768 code default will overflow on this path; that is
 why the number is written here and in the `wiki_lint.py` comment.
 
-False findings in the six list-tool trials are **not** counted. The reports are
-saved at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
-`/tmp/lint-ctx131k/reports` until the box is rebooted; counting them is a human
-task and the recall numbers above say nothing about precision.
+**Precision was hand-counted on 2026-09-11, across all nine trials.** Reports
+at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
+`/tmp/lint-ctx131k/reports` until the box is rebooted. Eighty-five asserted
+findings; **two are wrong**, both checked against the pages and both adjudicated
+by the vault's owner:
+
+- `hermes` and `hermes-agent` called one entity that contradicts itself
+  (`lint-ctx131k` trial 1). They are two products sharing a name — a model run
+  through Ollama, and a framework from a review article. The assertion had no
+  evidence behind it.
+- `local-llms` and `open-source-llms` called the same subject (`lint-baseline`
+  trial 2). They are different axes: what fits on the hardware, versus what the
+  licence lets you modify.
+
+Two more were wrong but correctly hedged: `evaluation-harness` against
+`model-evaluation`, flagged twice as a "lower confidence" merge candidate. The
+owner's ruling is that they are distinct — the harness is the thing that was
+built, a model evaluation is a result of running it. A hedged wrong answer is
+not a false finding, but it is not free either; it is still a line to read.
+
+So precision is about **98%**, and the judgment pass is worth reading. The same
+run also produced findings the owner accepted on sight: `newfield-public-safety-
+building-committee` is out of scope, `i-m-interested-in-building-indexed-muffin`
+is not a real project (the name is a Claude Code session's invention), and the
+"Fable" conflict is a genuine error — `llm-api-router.md` lists Fable and Sol as
+third-party API wrappers when Fable is an Anthropic model and Sol is an OpenAI
+one. That error is faithful to its source: `raw/daily-youtube/Daily-YouTube-2026-
+07-15.md` says "third-party API wrappers and routers like Fable and Sol". The
+ingest copied a wrong source correctly, and only a judgment pass can catch that
+class of fault.
+
+The same model disagreed with itself on both false findings. Another trial
+called `hermes`/`hermes-agent` "two different products that share a name", and
+another listed `local-llms`/`open-source-llms` under "checked and clear". Three
+trials are the floor for recall and they are the floor for precision too.
+
+**The seed pack collides with the host vault, and Tier B item counts are
+inflated because of it.** Roughly ten findings across the nine reports are true
+of the injected copy and meaningless for the real vault: `eval-harnesses`
+against the real `evaluation-harness` (six times), `log-rotation` against
+`log-management` (twice), `retrieval-pipeline` against `rag`, and
+`tool-schema-design` against `tool-design`. Those four seed pages name subjects
+the live vault already covers, so the pass correctly reports a duplicate we
+created. It scores nothing, it costs reading time, and it pads every report.
+Renaming those four seed pages is the fix; it is a change to the fixture, not to
+the lint, and it invalidates nothing above.
 
 The model is set per job, not globally.
 [`launchd/template-lint.plist.txt`](../launchd/template-lint.plist.txt)
