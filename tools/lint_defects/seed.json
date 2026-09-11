@@ -1,0 +1,88 @@
+{
+  "_readme": "The answer key. See README.md. 'pages' lists the slugs one numbered finding must name for the defect to score. 'superseded_by' is context for the human reader and is not scored.",
+
+  "raw_source": "source.md",
+  "raw_subdir": "misc",
+  "index_section": "Pages",
+
+  "defects": [
+    {
+      "id": "C1",
+      "kind": "contradiction",
+      "pages": ["vector-index-refresh", "retrieval-pipeline"],
+      "why": "One says the vector index rebuilds hourly, the other says nightly."
+    },
+    {
+      "id": "C2",
+      "kind": "contradiction",
+      "pages": ["token-budgeting", "context-window-limits"],
+      "why": "One budgets against a 128,000-token window, the other states a 32,768-token ceiling."
+    },
+    {
+      "id": "C3",
+      "kind": "contradiction",
+      "pages": ["batch-embedding", "embedding-storage"],
+      "why": "One says embeddings are computed at write time, the other says lazily on first read."
+    },
+
+    {
+      "id": "D1",
+      "kind": "duplicate",
+      "pages": ["tool-call-retries", "function-call-retry-policy"],
+      "why": "Two pages for retrying a failed tool call, under different titles."
+    },
+    {
+      "id": "D2",
+      "kind": "duplicate",
+      "pages": ["semantic-chunking", "meaning-based-splitting"],
+      "why": "Two pages for splitting a document at topic boundaries, under different titles."
+    },
+    {
+      "id": "D3",
+      "kind": "duplicate",
+      "pages": ["agent-run-budget", "wall-clock-ceiling"],
+      "why": "Two pages for the wall-clock bound on one run, under different titles."
+    },
+
+    {
+      "id": "O1",
+      "kind": "out_of_scope",
+      "pages": ["retrospective-pizza-night"],
+      "why": "Catering and room booking. RULES.md excludes social events and catering."
+    },
+    {
+      "id": "O2",
+      "kind": "out_of_scope",
+      "pages": ["volunteer-day-logistics"],
+      "why": "Volunteer day sign-up and transport. RULES.md excludes volunteer days."
+    },
+    {
+      "id": "O3",
+      "kind": "out_of_scope",
+      "pages": ["dental-plan-enrollment"],
+      "why": "Benefits enrollment. RULES.md excludes employee benefits administration."
+    },
+
+    {
+      "id": "U1",
+      "kind": "outdated",
+      "pages": ["retry-ceiling-default"],
+      "superseded_by": "daily-notes-2026-08-14",
+      "why": "States a ceiling of three attempts. The 2026-08-14 note raised it to eight."
+    },
+    {
+      "id": "U2",
+      "kind": "outdated",
+      "pages": ["quantization-builds"],
+      "superseded_by": "daily-notes-2026-08-21",
+      "why": "States 4-bit is the only build. The 2026-08-21 note records an 8-bit build shipping."
+    },
+    {
+      "id": "U3",
+      "kind": "outdated",
+      "pages": ["lint-schedule"],
+      "superseded_by": "daily-notes-2026-09-06",
+      "why": "States the audit runs daily at 02:00. The 2026-09-06 note moved it to Sunday at 10:00."
+    }
+  ]
+}
