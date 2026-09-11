@@ -343,11 +343,22 @@ Recall did not vary. The judgment pass on Tier B scored 6, 3, 5, 3, 3, 5 across
 six trials and had to be quoted as "about four". Zero false positives in 105
 page judgments.
 
-Over 70 real vault pages: 70 of 70 swept, mean 17.1s/page, median 13.5s,
-slowest 61.1s, one flag, zero unreadable. That is **2.7 hours at 569 pages**,
-and an upper bound — `ollama ps` showed a second model resident on the GPU for
-the whole run and nothing in this work loaded it. Re-time on an idle box before
-trusting the number for anything but sizing.
+Cost, measured twice on `qwen3.8:27b-mlx`:
+
+| | 70 real pages, GPU contended | 569 pages, GPU idle |
+|---|---|---|
+| mean | 17.1s | 10.0s |
+| median | 13.5s | 7.6s |
+| slowest page | 61.1s | 83.8s |
+| whole vault | 2.7 h projected | **1.58 h actual** |
+
+The contended figure had `gemma4:26b-mlx` resident for every trial and nothing
+in this work loaded it. The idle run (2026-09-11, 10:20:30 to 11:55:22) is the
+one to size against. Note the tail moved the wrong way: the idle box is faster
+on average and has the **worse** slowest page, so treat a projection built from
+means as a projection, not a bound.
+
+The whole `--deep` run took 1h 43m — sweep 94.9 min, judgment pass 7.8 min.
 
 Two findings worth not rediscovering:
 
@@ -372,15 +383,42 @@ Consequences, all landed together:
   else on the box.
 - `SWEEP_PAGE_CEILING_SECONDS = 120` and `MAX_SWEEP_RETRIES = 2`. Once the run
   budget is four hours it can no longer be the thing that catches a wedged
-  server; a per-page ceiling catches it in two minutes. 120s is twice the
-  slowest page ever measured.
+  server; a per-page ceiling catches it in two minutes. 120s clears the slowest
+  page measured (83.8s) by 1.4x — it was 2x against the contended numbers, so
+  re-check the headroom whenever the slowest page moves.
 - One log line per page. A pass that can run for hours is indistinguishable
   from a wedged one if it is silent.
+
+### What the first full run showed — 2026-09-11
+
+569 pages, 12 findings, 0 unreadable, read by hand: 2 pages genuinely out of
+scope, 2 in-scope pages carrying banned text, 3 judgment calls, 5 noise. One
+flag per 47 pages, which is still a readable weekly report. The noise has one
+shape — the model reaches for "Enterprise productivity administration that
+teaches no reusable lesson" for any infrastructure page, and that RULES line
+was written about someone else's SharePoint.
+
+The same run's judgment pass read 21 of 569 pages and reported "Out-of-scope
+pages: None found", having searched for the banned words and got zero hits. The
+sweep found the banned word on page 18 of `ai-chat-learnings-2026-08-18`. Same
+run, same model, same vault. That is the argument for the sweep in one line.
+
+**Borderline pages are not repeatable.** `google-cloud-platform` flagged during
+the run and came back CLEAN when asked again 75 minutes later, same model, same
+prompt, same text. Clear pages are stable — `ai-tinkerers` flagged both times.
+Treat a single flag on a borderline page as a lead, not a verdict, and do not
+write a test that depends on one.
+
+**The finding text is the last paragraph, not the last numbered line**
+(`eadb642`). That page answered a numbered checklist of Scope lines and then
+concluded in prose below it, so reading the last numbered line put a checklist
+fragment at the head of the report. The paragraph break decides first and the
+numbered item decides inside it; see `_sweep_body`.
 
 Open: the judgment pass's prompt still asks for out-of-scope pages, so the two
 passes overlap on one category. Removing it is the obvious tidy, and it is an
 unmeasured prompt change to a pass whose recall is already unstable — measure
-before touching it. Also watch the flag rate: one per 70 pages is readable, and
+before touching it. Also watch the flag rate: one per 47 pages is readable, and
 the sweep is only useful while someone will actually read every flag.
 
 ## End-to-end verification
