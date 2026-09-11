@@ -983,6 +983,7 @@ def complete_text(
     host: str = None,
     provider: str = None,
     logger: Optional[logging.Logger] = None,
+    think: Optional[bool] = None,
 ) -> str:
     """Single-turn, tool-free completion — for tasks where the caller
     assembles the surrounding structure itself rather than trusting the
@@ -990,7 +991,10 @@ def complete_text(
 
     logger is optional but worth passing: it names the task in the usage
     ledger, and it is what lets _post_with_retry say that it is backing off.
-    Without it a one-shot call is recorded as task "unknown"."""
+    Without it a one-shot call is recorded as task "unknown".
+
+    think: see _run_ollama. Ollama only — Gemini has no equivalent field, and
+    a caller that sets it against Gemini is silently asking for nothing."""
     name = _provider(provider)
 
     if name == "gemini":
@@ -1019,17 +1023,23 @@ def complete_text(
     model = _ollama_model(model)
     host = _ollama_host(host)
     options = _ollama_options()
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "stream": False,
+        "options": options,
+    }
+    # Same contract as _run_ollama: omitted entirely when the caller said
+    # nothing, so a model with no notion of thinking sees exactly the request
+    # it saw before this existed.
+    if think is not None:
+        payload["think"] = think
     data = _post_and_record(
         f"{host}/api/chat",
-        {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "stream": False,
-            "options": options,
-        },
+        payload,
         backend="ollama",
         model=model,
         caller="complete_text",

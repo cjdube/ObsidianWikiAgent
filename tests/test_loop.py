@@ -438,6 +438,23 @@ def test_think_false_reaches_ollama(monkeypatch):
     assert seen[0]["think"] is False
 
 
+def test_think_false_reaches_ollama_from_complete_text(monkeypatch):
+    """complete_text needs the same switch for the same reason: the judgment
+    sweep in tools/measure_driven_pass_a.py calls it once per page, and
+    measured 2026-09-11 reasoning cost 46s a page against 0.4s with it off."""
+    seen = []
+
+    def fake_post(url, payload, **kwargs):
+        seen.append(payload)
+        return FakeResp(200, json_data={"message": {"content": "done"}})
+
+    monkeypatch.setattr(loop, "_post_with_retry", fake_post)
+
+    loop.complete_text("sys", "user", provider="ollama", think=False)
+
+    assert seen[0]["think"] is False
+
+
 def test_think_is_omitted_by_default(monkeypatch):
     """Saying nothing must send nothing. A model with no notion of thinking
     should see exactly the request it saw before the parameter existed, rather
