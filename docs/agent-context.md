@@ -153,11 +153,18 @@ vault size the binding constraint is sampling, not the model.** A better model
 is worth having and does not solve this. A clean judgment report still is not
 evidence that the vault is clean.
 
-Both Tier B runs also produced true findings nobody planted, which is the
-argument for reading the reports rather than only the score: repeated section
-blocks inside `scribe-jay.md`, and two candidate duplicate pairs
-(`prioritization`/`product-value-definition`, `evaluation-harness`/
-`model-evaluation`).
+Both Tier B runs also reported findings nobody planted, and checking them
+against the live vault on 2026-09-10 is the argument for reading reports rather
+than trusting a score. `qwen3.8:27b-mlx` named two candidate duplicate pairs.
+`prioritization`/`product-value-definition` is real: the thin page restates the
+other from a same-day source. `evaluation-harness`/`model-evaluation` is
+concept-against-event, which the model itself labelled lower confidence, and it
+was right to. `gemma4:26b-mlx` reported that `scribe-jay.md` repeats whole
+sections; it does not. The page has three `## ` headings, each appearing once,
+and the model mistook a bullet labelled `**Architecture Evolution**` sitting
+under a heading of the same name for a repeated block. That is a false finding
+and it is counted as one — the control model's Tier B record is one true
+finding and one false, from two.
 
 The model is set per job, not globally.
 [`launchd/template-lint.plist.txt`](../launchd/template-lint.plist.txt)
