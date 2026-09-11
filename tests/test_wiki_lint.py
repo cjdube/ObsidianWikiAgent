@@ -935,3 +935,37 @@ def test_json_missing_vault_is_an_error_object_not_a_crash(vault, monkeypatch, c
     )
     assert wl.main() == 2
     assert "error" in _json_out(capsys)
+
+
+# --- judgment-pass coverage ------------------------------------------------
+
+
+def test_coverage_line_reports_the_share_read():
+    assert wl._coverage_line(27, 582) == (
+        "Judgment pass read 27 of 582 pages (4.6%). "
+        "This is a sample, not a sweep."
+    )
+
+
+def test_coverage_line_survives_an_empty_vault():
+    assert wl._coverage_line(0, 0).startswith("Judgment pass read 0 of 0 pages.")
+
+
+def test_pages_read_counts_each_page_once(vault):
+    vault.page("a", good_page(title="A"))
+    dispatch = wl.query_dispatch(vault.path)
+    counter = wl._PagesRead(dispatch)
+
+    assert "content" in dispatch["read_wiki_page"](name="a")
+    dispatch["read_wiki_page"](name="A.md")
+
+    assert len(counter) == 1
+
+
+def test_pages_read_ignores_a_page_that_does_not_exist(vault):
+    dispatch = wl.query_dispatch(vault.path)
+    counter = wl._PagesRead(dispatch)
+
+    assert "error" in dispatch["read_wiki_page"](name="missing")
+
+    assert len(counter) == 0

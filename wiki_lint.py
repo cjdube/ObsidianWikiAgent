@@ -742,6 +742,50 @@ def _render(findings: dict[str, list[str]]) -> tuple[str, int]:
     return "\n".join(lines), n
 
 
+def _coverage_line(read: int, total: int) -> str:
+    """One sentence saying how much of the vault the judgment pass saw.
+
+    Separate from _PagesRead so the wording is testable without a model run.
+    """
+    share = f" ({read / total:.1%})" if total else ""
+    return (
+        f"Judgment pass read {read} of {total} pages{share}. "
+        f"This is a sample, not a sweep."
+    )
+
+
+class _PagesRead:
+    """Counts the distinct pages the judgment pass actually opened.
+
+    The pass samples the vault — it searches, reads what the search surfaced,
+    and stops when it believes it is done. Nothing said so. A clean report over
+    27 of 582 pages read exactly like a clean vault, which is the failure mode
+    docs/agent-context.md has warned about since 2026-09-03.
+
+    This does not widen the sample. It reports its size, so a later change has
+    a number to move. Wrapping the dispatch entry rather than read_wiki_page
+    itself keeps the count scoped to this one run: the tool is shared with
+    wiki_query.py, which is not sampling anything.
+    """
+
+    def __init__(self, dispatch: dict):
+        self.slugs: set[str] = set()
+        self._read = dispatch["read_wiki_page"]
+        dispatch["read_wiki_page"] = self._count
+
+    def _count(self, name: str) -> dict:
+        result = self._read(name)
+        if "content" in result:
+            # _safe_page_path lower-cases the name and appends '.md', so for
+            # any name that resolved to a real page this is its on-disk slug.
+            # Refusals and misses are not reads and must not inflate coverage.
+            self.slugs.add(name.lower().removesuffix(".md"))
+        return result
+
+    def __len__(self) -> int:
+        return len(self.slugs)
+
+
 def _lint(args, rules_path: Path, logger) -> int:
     """Run the passes and print the report. Returns the structural finding
     count. Split out of main() so main() owns the run markers and the one
@@ -783,6 +827,7 @@ def _lint(args, rules_path: Path, logger) -> int:
         print("\n---\n\n## Judgment pass\n")
         context = report if count else "The structural pass found no problems."
         dispatch = query_dispatch(args.vault)
+        pages_read = _PagesRead(dispatch)
         # The judgment pass is one unit of work for retry-ceiling purposes: 120
         # iterations x 5 HTTP attempts is up to 600 retries against a provider
         # that may simply be down, and nothing else here bounds that.
@@ -800,6 +845,10 @@ def _lint(args, rules_path: Path, logger) -> int:
             logger=logger,
         )
         print(judgment)
+        print(f"\n{_coverage_line(len(pages_read), len(pages))}")
+        logger.info(
+            f"Judgment pass read {len(pages_read)} of {len(pages)} pages"
+        )
         if judgment.startswith(INCOMPLETE_PREFIX):
             raise RuntimeError(f"deep judgment incomplete: {judgment}")
 

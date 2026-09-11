@@ -78,6 +78,9 @@ INCOMPLETE = "[incomplete"
 # the report, the tool-call timeline and the context-fill warnings together.
 _TOOL_CALL = re.compile(r"\[INFO\] tool_call (\w+)\(")
 _CONTEXT_FILL = re.compile(r"\((\d+)% of num_ctx=(\d+)\)")
+# wiki_lint._coverage_line. The judgment pass samples the vault, and this is
+# the size of the sample — the number a coverage change has to move.
+_PAGES_READ = re.compile(r"Judgment pass read (\d+) of (\d+) pages")
 # A finding is numbered, but the number is not always the first character.
 # qwen3.8:27b-mlx writes every finding as "**7. Out-of-scope page — ...**",
 # and an earlier version of this pattern scored two of its three trials at
@@ -350,8 +353,11 @@ def run_metrics(stdout: str) -> dict:
     to be located or de-interleaved from a concurrent run."""
     fills = [(int(p), int(n)) for p, n in _CONTEXT_FILL.findall(stdout)]
     report = judgment_text(stdout)
+    read = _PAGES_READ.search(stdout)
     return {
         "tool_calls": len(_TOOL_CALL.findall(stdout)),
+        "pages_read": int(read.group(1)) if read else 0,
+        "pages_total": int(read.group(2)) if read else 0,
         "peak_pct": max((p for p, _ in fills), default=0),
         "num_ctx": fills[0][1] if fills else 0,
         "completed": bool(report.strip()) and INCOMPLETE not in report,
@@ -361,11 +367,22 @@ def run_metrics(stdout: str) -> dict:
 # --- reporting --------------------------------------------------------------
 
 _HEADER = (f"{'model':<20}{'trials':>7}{'recall':>18}{'done':>7}"
-           f"{'calls':>8}{'ctx':>6}{'secs':>8}")
+           f"{'calls':>8}{'pages':>12}{'ctx':>6}{'secs':>8}")
 
 
 def _mean(xs):
     return sum(xs) / len(xs) if xs else 0
+
+
+def _pages_cell(trials: list[dict]) -> str:
+    """Mean distinct pages read, over the vault's page count.
+
+    Both halves matter: 27 is meaningless without the 582 it is 27 of, and the
+    denominator differs by more than tenfold between a Tier A run and a Tier B
+    one.
+    """
+    total = max(t["metrics"]["pages_total"] for t in trials)
+    return f"{_mean([t['metrics']['pages_read'] for t in trials]):.0f}/{total}"
 
 
 def report_table(rows: list[dict], out=print) -> None:
@@ -384,6 +401,7 @@ def report_table(rows: list[dict], out=print) -> None:
             f"{f'{_mean(recalls):.1f}/{total}':>18}"
             f"{sum(1 for t in trials if t['metrics']['completed']):>7}"
             f"{_mean([t['metrics']['tool_calls'] for t in trials]):>8.0f}"
+            f"{_pages_cell(trials):>12}"
             f"{max(t['metrics']['peak_pct'] for t in trials):>5.0f}%"
             f"{_mean([t['seconds'] for t in trials]):>8.0f}"
         )
@@ -399,6 +417,9 @@ def report_table(rows: list[dict], out=print) -> None:
     out("recall  mean planted defects named, of the total. Auto-scored.")
     out("done    trials that returned a report rather than [incomplete].")
     out("calls   mean tool calls. The 2026-09-06 production run used 19 of 120.")
+    out("pages   mean DISTINCT pages read, of the vault's pages. The judgment")
+    out("        pass samples; a low share means a clean report is not a clean")
+    out("        vault. This is the coverage number, and recall follows it.")
     out("ctx     highest context fill seen, across trials.")
     out("")
     out("FALSE FINDINGS ARE NOT SCORED HERE. Read the saved reports and count")
@@ -523,6 +544,7 @@ def main(argv=None):
                   f"{result['score']['total']} "
                   f"{sorted(result['score']['found'])} — "
                   f"{result['metrics']['tool_calls']} calls, "
+                  f"{result['metrics']['pages_read']} pages, "
                   f"{result['seconds']:.0f}s -> {name}")
             rows.append(result)
 

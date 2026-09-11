@@ -282,13 +282,15 @@ def test_run_once_sets_ollama_model_and_clears_a_stray_provider(monkeypatch):
 # --- the table --------------------------------------------------------------
 
 
-def _row(model, found, completed=True, calls=20, pct=40, secs=100.0):
+def _row(model, found, completed=True, calls=20, pct=40, secs=100.0,
+         pages_read=27, pages_total=582):
     return {
         "model": model,
         "seconds": secs,
         "score": {"found": found, "recall": len(found), "total": 12, "items": 5},
         "metrics": {"tool_calls": calls, "peak_pct": pct, "num_ctx": 65536,
-                    "completed": completed},
+                    "completed": completed, "pages_read": pages_read,
+                    "pages_total": pages_total},
     }
 
 
@@ -396,3 +398,34 @@ def test_a_finding_the_pack_adds_is_still_caught():
     after = clm.findings_in(json.dumps(
         {"sections": {"Page format": ["n8n.md"], "Orphan pages": ["dental-plan-enrollment.md"]}}))
     assert sorted(after - before) == ["Orphan pages: dental-plan-enrollment.md"]
+
+
+def test_metrics_read_the_coverage_line():
+    """wiki_lint prints how much of the vault the judgment pass opened. Reading
+    it here is what lets a coverage change be compared across runs instead of
+    hand-counted off a saved report."""
+    stdout = (
+        "## Judgment pass\n\n1. gamma.md is out of scope.\n\n"
+        "Judgment pass read 27 of 582 pages (4.6%). "
+        "This is a sample, not a sweep.\n"
+    )
+    metrics = clm.run_metrics(stdout)
+    assert metrics["pages_read"] == 27
+    assert metrics["pages_total"] == 582
+
+
+def test_metrics_report_no_coverage_when_the_line_is_absent():
+    """A report saved before the coverage line existed must still tabulate."""
+    metrics = clm.run_metrics("## Judgment pass\n\n1. a.md is out of scope.\n")
+    assert metrics["pages_read"] == 0
+    assert metrics["pages_total"] == 0
+
+
+def test_table_shows_pages_read_over_the_vault_size():
+    lines = []
+    clm.report_table(
+        [_row("a", ["C1"], pages_read=20), _row("a", ["C1"], pages_read=30)],
+        out=lines.append,
+    )
+    assert any("25/582" in line for line in lines)
+    assert any(line.startswith("pages ") for line in lines)
