@@ -111,6 +111,77 @@ Two conclusions:
 
 The provider was changed afterwards, on 2026-09-10: [`launchd/template-lint.plist.txt`](../launchd/template-lint.plist.txt) no longer sets `LLM_PROVIDER`, so an installed lint job inherits the local default like the daily ingest. The reason is not the recall numbers above — by those Gemini is the better auditor, 4 of 12 against 2 of 12 — but that a tracked template is a shipped default, and a shipped default should not route a stranger's vault off their machine on the first `install.sh`. The opt-in itself is unchanged and still described in [`SECURITY.md`](../SECURITY.md); the template documents the two lines to add, and `install.sh` prints a warning naming the provider when a generated plist carries one. Anyone weighing that trade should read the 4-of-12 figure first: local is a working audit, not an equal one.
 
+### Deep lint local model comparison — Active
+
+Measured 2026-09-10. This is the first comparison with a committed harness:
+[`tools/compare_lint_models.py`](../tools/compare_lint_models.py) plus the seed
+pack in `tools/lint_defects/`. The 2026-09-03 run above was done by hand and
+its vault was never saved, so it could not be repeated. This one can.
+
+**Tier A** is a standalone 35-page fixture carrying all 12 planted defects,
+three per judgment category. It is small on purpose. The pass samples a vault
+rather than sweeping it, so on a large vault recall measures sampling luck.
+Three trials per model:
+
+| Model | Type | Recall of 12 | False findings | Calls | Peak ctx | Seconds |
+|---|---|---|---|---|---|---|
+| `qwen3.8:27b-mlx` | dense | **9.7** | 0 | 31 | 24% | 397 |
+| `gemma4:26b-mlx` | MoE, ~3.8B active | 5.0 | 0 | 22 | 22% | 105 |
+| `gemma4:31b-mlx` | dense | 4.7 | 1 | 12 | 12% | 222 |
+
+False findings were counted by hand from all nine saved reports; the harness
+does not score them and says so in its own output.
+
+`gemma4:26b-mlx` was never wrong, but it answers in three grouped findings and
+stops — consistent with auditing a wiki on ~3.8B active parameters.
+`gemma4:31b-mlx` is not the fix: same recall, twice the wall clock, and the one
+false finding in the set (it told the vault to delete a dated notes page).
+`qwen3.8:27b-mlx` roughly doubles recall for about four times the control's
+wall clock, which still lands well inside `DEEP_RUN_BUDGET_MINUTES = 30`. It
+also declines to invent: two of its findings are explicit statements that it
+found nothing in a category and would not manufacture one.
+
+All three models stayed **100% GPU** at `OLLAMA_NUM_CTX=65536` on the 48 GB
+machine. The `config/.env` fallback to 49152 was not needed.
+
+**Tier B** injected the same 12 defects into a `git archive` copy of the
+learnings vault (609 pages), one trial per model. Recall collapsed for both:
+`qwen3.8:27b-mlx` 2 of 12 in 410s, `gemma4:26b-mlx` 1 of 12 in 161s, both
+peaking at 35-36% of the window and both finishing inside the budget. That is
+the 2026-09-03 conclusion again, and it is the more important one: **at real
+vault size the binding constraint is sampling, not the model.** A better model
+is worth having and does not solve this. A clean judgment report still is not
+evidence that the vault is clean.
+
+Both Tier B runs also produced true findings nobody planted, which is the
+argument for reading the reports rather than only the score: repeated section
+blocks inside `scribe-jay.md`, and two candidate duplicate pairs
+(`prioritization`/`product-value-definition`, `evaluation-harness`/
+`model-evaluation`).
+
+The model is set per job, not globally.
+[`launchd/template-lint.plist.txt`](../launchd/template-lint.plist.txt)
+documents the `OLLAMA_MODEL` lines and the numbers but does not ship them, for
+the same reason it no longer ships `LLM_PROVIDER`: a tracked template must not
+assume a tag is pulled on a stranger's machine. `agent/__init__.py` calls
+`load_dotenv` without `override`, so the plist entry beats `config/.env` and
+the daily ingest keeps its own model with no code change.
+
+Two scorer defects were found and fixed while reading these results, both of
+which had produced wrong numbers first: a numbered finding written as `**7. …**`
+was not recognised as numbered, which scored two of `qwen3.8:27b-mlx`'s three
+best trials at zero; and text after the last finding is scored as part of it,
+which credited a page the model had explicitly called clean. The first is
+fixed. The second is documented in `score_report` and printed by the tool,
+because every rule that truncates the last finding also truncates real
+multi-paragraph findings.
+
+Thinking mode was deliberately not changed in this comparison — one variable at
+a time. `wiki_lint.py` still calls `run_agent` with no `think=` argument, so
+each model uses its own default, and `qwen3.8:27b-mlx` thinks by default. The
+open question is whether turning it off recovers wall clock without costing
+recall.
+
 ## End-to-end verification
 
 ### Test ingest changes on a fresh vault copy — Active

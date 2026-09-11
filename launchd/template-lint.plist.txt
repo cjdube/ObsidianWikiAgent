@@ -87,6 +87,35 @@
              <key>LLM_PROVIDER</key>
              <string>gemini</string>
 
+         OLLAMA_MODEL is also absent, and for the same kind of reason: a tag
+         that is not pulled on the machine makes the job fail, so a tracked
+         template must not assume one. But the deep pass is the one job where
+         the tag matters, and config/.env's ingest default is the wrong pick
+         for it. gemma4:26b-mlx is a mixture-of-experts model: 25.2B total
+         parameters, only ~3.8B active per token. It audits a whole wiki with
+         about 4B parameters of judgment, and it shows — it answers in three
+         grouped findings and stops.
+
+         Measured 2026-09-10 on a 35-page fixture with 12 planted defects,
+         three trials each (tools/compare_lint_models.py rebuilds this):
+
+             qwen3.8:27b-mlx   9.7 of 12   0 false findings   397s
+             gemma4:26b-mlx    5.0 of 12   0 false findings   105s
+             gemma4:31b-mlx    4.7 of 12   1 false finding    222s
+
+         qwen3.8:27b-mlx is dense and roughly twice the auditor for about four
+         times the wall clock, which still lands well inside the 30-minute
+         budget. The dense Gemma is not worth it: same recall, twice the time.
+         All three stayed 100% GPU at OLLAMA_NUM_CTX=65536 on a 48 GB machine.
+
+         To use it, pull the tag (`ollama pull qwen3.8:27b-mlx`) and add the
+         two lines below to the dict that follows. agent/__init__.py calls
+         load_dotenv without override, so a real environment variable set here
+         beats config/.env and the daily ingest keeps its own model.
+
+             <key>OLLAMA_MODEL</key>
+             <string>qwen3.8:27b-mlx</string>
+
          WIKI_LAUNCHD_LOG: same path as StandardOutPath above, so the script can
          cap the file it is writing to. launchd owns that descriptor and nothing
          rotates it otherwise. Must match those two paths exactly.
