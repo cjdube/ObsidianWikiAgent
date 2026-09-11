@@ -153,6 +153,42 @@ vault size the binding constraint is sampling, not the model.** A better model
 is worth having and does not solve this. A clean judgment report still is not
 evidence that the vault is clean.
 
+**Tier B re-measured the same day, three trials.** One trial was not enough to
+quote, and the harness says so in its own output. Running `qwen3.8:27b-mlx`
+three times against the same injected 609-page copy scores **1.0 of 12** — 1,
+1 and 1, in 698s, 674s and 436s, 36 calls mean, peaking at 55% of the window,
+three of three completed. The 2 of 12 above was a single trial and is
+superseded by this.
+
+What it found matters more than the score. Across all three trials it named
+only `volunteer-day-logistics` (twice) and `dental-plan-enrollment` (once),
+and both are single-page out-of-scope defects — visible from one page, with
+nothing to cross-reference. It named **none** of the nine defects that span two
+pages: no contradiction, no duplicate concept, no outdated claim, in any trial.
+`dental-plan-enrollment` is also the softest of the twelve under `--inject`,
+which keeps the host `RULES.md`: that file excludes volunteer and community
+operations by name, but reaches benefits administration only by omission from
+the in-scope list.
+
+Coverage is the explanation, and it is measurable. Counted by hand from the
+three saved reports, the pass opened 35, 33 and 18 distinct pages — a mean of
+**29 of 609, or 4.7%**. Every cap was slack at the same time: 36 tool calls of
+`MAX_DEEP_ITERATIONS = 120`, 603s of `DEEP_RUN_BUDGET_MINUTES = 30`, 55% of a
+65,536-token window. Nothing stopped the pass; it stopped because it believed
+it was done. A model cannot compare two pages it never opened together, which
+is exactly why the one-page defects are the ones that survive at this size.
+Raising a cap does not address this.
+
+False findings in those three trials have not been counted. The one-true,
+one-false record described below is from the single trials only.
+
+`wiki_lint.py` now reports that share rather than leaving it to be hand-counted:
+`_coverage_line` ends every judgment pass with the distinct pages it read, the
+same number goes to the log, and `run_metrics` in the harness parses it into a
+`pages` column. This is reporting, not repair — it changes no recall number and
+was not expected to. It exists so the next change to coverage has a tracked
+number to move.
+
 Both Tier B runs also reported findings nobody planted, and checking them
 against the live vault on 2026-09-10 is the argument for reading reports rather
 than trusting a score. `qwen3.8:27b-mlx` named two candidate duplicate pairs.
