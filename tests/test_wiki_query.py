@@ -44,10 +44,17 @@ def test_the_read_side_prompts_only_name_tools_it_can_dispatch(vault):
     import wiki_lint
     from agent.wiki_tools import query_dispatch
 
-    available = set(query_dispatch(vault.path))
-    assert "read_index" not in available  # the index is not a bounded result
+    # Each prompt is checked against the dispatch its own workflow builds. The
+    # judgment pass advertises one tool the query path does not, so a single
+    # shared set would either fail here or quietly stop guarding the lint.
+    pairs = (
+        (wq.ANSWER_WRAPPER, set(query_dispatch(vault.path))),
+        (wiki_lint.LINT_WRAPPER, set(wiki_lint.lint_dispatch(vault.path))),
+    )
+    for _, available in pairs:
+        assert "read_index" not in available  # the index is not a bounded result
 
-    for prompt in (wq.ANSWER_WRAPPER, wiki_lint.LINT_WRAPPER):
+    for prompt, available in pairs:
         assert "index.md" not in prompt
         named = set(re.findall(r"\b(read_index|[a-z_]+_wiki_pages?)\b", prompt))
         assert named, "a workflow prompt that names no tool cannot be checked"

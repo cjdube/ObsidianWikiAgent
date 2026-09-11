@@ -969,3 +969,33 @@ def test_pages_read_ignores_a_page_that_does_not_exist(vault):
     assert "error" in dispatch["read_wiki_page"](name="missing")
 
     assert len(counter) == 0
+
+
+# --- the judgment pass's own tool set ---------------------------------------
+
+
+def test_lint_advertises_list_wiki_pages_and_can_dispatch_it(vault):
+    """Under measurement: the pass used to be told no such tool existed, so it
+    guessed its search terms. Advertising a tool nothing dispatches is an
+    unknown-tool error and a wasted iteration, so the two are asserted together."""
+    advertised = {t["function"]["name"] for t in wl.LINT_TOOL_SCHEMAS}
+    assert "list_wiki_pages" in advertised
+    assert advertised <= set(wl.lint_dispatch(vault.path))
+
+
+def test_the_query_path_is_not_given_the_page_list(vault):
+    """The deviation is the judgment pass's alone. wiki_query.py answers one
+    question at a time and has no reason for a result sized by the vault."""
+    from agent.wiki_tools import QUERY_TOOL_SCHEMAS
+
+    assert "list_wiki_pages" not in {
+        t["function"]["name"] for t in QUERY_TOOL_SCHEMAS
+    }
+
+
+def test_the_prompt_no_longer_denies_the_page_list():
+    """LINT_WRAPPER told the model 'You have no tool that returns the index'.
+    Leaving that in place beside the tool is how a stage ends up never calling
+    what it was given."""
+    assert "no tool that returns the index" not in wl.LINT_WRAPPER
+    assert "list_wiki_pages" in wl.LINT_WRAPPER

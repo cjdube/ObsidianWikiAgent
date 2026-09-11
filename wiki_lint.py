@@ -44,6 +44,7 @@ Usage:
 
 import argparse
 import datetime
+import functools
 import json
 import re
 import sys
@@ -54,6 +55,7 @@ from agent.common import setup_logger, trim_launchd_log
 from agent.loop import INCOMPLETE_PREFIX, run_agent
 from agent.notify import notify_failure
 from agent.wiki_tools import (
+    LIST_WIKI_PAGES_SCHEMA,
     QUERY_TOOL_SCHEMAS,
     RawScan,
     UNFILED_HEADING,
@@ -109,12 +111,52 @@ Your job is only the checks that need judgment:
 3. Out-of-scope pages — subjects the Scope section above excludes.
 4. Outdated claims — a claim a later source has superseded.
 
-Call search_wiki_pages to find the pages a category concerns, then read them.
-You have no tool that returns the index; search is how you find out what exists.
+Call list_wiki_pages to see every page name, and search_wiki_pages to find
+the pages a category concerns, then read them.
 Report findings as a numbered list, each naming the specific pages and a
 suggested fix. Report only
 what you actually verified by reading the pages — if you find nothing in a
 category, say so rather than inventing something. Do not write to the wiki."""
+
+
+# MEASURED 2026-09-11. This is the one deviation from QUERY_TOOL_SCHEMAS, and
+# it is deliberately narrow: the judgment pass gets list_wiki_pages,
+# wiki_query.py does not.
+#
+# AGENTS.md says to keep model-visible catalogue results bounded by the answer
+# rather than by vault size, and that rule is right about the *index*: with
+# summaries it is 90.8 KB, about 35% of a 65,536-token window, and it grows
+# forever. A bare list of page names is a different object — 12.7 KB and 4.9%
+# of the window at 609 pages — and the ban was never measured separately for
+# it. The incident behind the rule is LocalLLMAgent's, where a 62 KB index met
+# an 8 KB result cap and exposed 42 of 388 entries silently; no such cap exists
+# on this side.
+#
+# LINT_WRAPPER used to tell the model no such tool existed, so the pass guessed
+# its search terms and could not miss what it could not name. Six Tier B trials
+# against a 609-page copy say the names are worth having:
+#
+#     no list tool, 3 trials   recall 1.0 of 12, 29 pages read, 603s
+#     list tool, 6 trials      recall 4.2 of 12, 56 pages read, 964s
+#
+# The gain is coverage, not cleverness: the pass reads roughly twice as many
+# pages and finds roughly four times as many planted defects. It costs about
+# 60% more wall clock, well inside DEEP_RUN_BUDGET_MINUTES.
+#
+# The list itself is not what fills the window; the extra page reads are. The
+# first three of those trials ran at OLLAMA_NUM_CTX=65536 and peaked at 113%,
+# which Ollama does not report as an error — it drops the oldest messages, so
+# one report in three was written without RULES.md. config/.env now pins
+# 131072, where the same run peaks at 42%. Do not lower it back.
+LINT_TOOL_SCHEMAS = QUERY_TOOL_SCHEMAS + [LIST_WIKI_PAGES_SCHEMA]
+
+
+def lint_dispatch(vault_path: str) -> dict:
+    """query_dispatch plus the one tool only the judgment pass advertises."""
+    return {
+        **query_dispatch(vault_path),
+        "list_wiki_pages": functools.partial(list_wiki_pages, vault_path),
+    }
 
 
 def _pages(vault_path: str) -> dict[str, str]:
@@ -826,7 +868,7 @@ def _lint(args, rules_path: Path, logger) -> int:
     if args.deep:
         print("\n---\n\n## Judgment pass\n")
         context = report if count else "The structural pass found no problems."
-        dispatch = query_dispatch(args.vault)
+        dispatch = lint_dispatch(args.vault)
         pages_read = _PagesRead(dispatch)
         # The judgment pass is one unit of work for retry-ceiling purposes: 120
         # iterations x 5 HTTP attempts is up to 600 retries against a provider
@@ -839,7 +881,7 @@ def _lint(args, rules_path: Path, logger) -> int:
             + "\n\nStructural findings already reported (do not repeat these):\n"
             + context,
             user_prompt="Audit the wiki and report your findings.",
-            tools=QUERY_TOOL_SCHEMAS,
+            tools=LINT_TOOL_SCHEMAS,
             dispatch=dispatch,
             max_iterations=MAX_DEEP_ITERATIONS,
             logger=logger,
