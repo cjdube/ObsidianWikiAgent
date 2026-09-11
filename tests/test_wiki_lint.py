@@ -971,13 +971,62 @@ def test_the_finding_is_the_last_numbered_item_not_the_first():
     assert wl._sweep_body(reply) == "Page b includes a volunteer day section; remove it."
 
 
-def test_a_finding_with_no_numbered_item_is_kept_whole():
+def test_a_finding_with_no_numbered_item_is_kept():
     """A parser that goes looking for the finding can come back empty, and an
     empty finding reads as a clean page. Verbose beats missing."""
     reply = "This page is about catering, which the Scope excludes.\nVERDICT: FINDING"
     assert wl._sweep_body(reply) == (
         "This page is about catering, which the Scope excludes."
     )
+
+
+def test_reasoning_numbered_above_a_prose_conclusion_is_not_the_finding():
+    """The shape that broke the 569-page run. The model worked through the
+    Scope lines as a numbered checklist, then concluded in prose underneath, so
+    reading the last numbered line of the whole reply put a fragment of the
+    checklist at the head of the report:
+
+        9. google-cloud-platform — Is it "Meetings, social..."? No.
+
+    A conclusion below a blank line is the finding. The checklist is not."""
+    reply = (
+        '1. Is it "AARP..."? No.\n'
+        '2. Is it "Meetings, social..."? No.\n'
+        "\n"
+        "The page records administrative tasks.\n"
+        "\n"
+        "Therefore the subject falls under the exclusion of "
+        '"Enterprise productivity administration".\n'
+        "VERDICT: FINDING"
+    )
+    assert wl._sweep_body(reply) == (
+        "Therefore the subject falls under the exclusion of "
+        '"Enterprise productivity administration".'
+    )
+
+
+def test_the_numbered_item_still_wins_inside_the_last_paragraph():
+    """The common shape: one sentence of reasoning and the numbered item under
+    it, no blank line between. Only the numbered item belongs in the report, so
+    the paragraph rule must not undo the numbered-item rule."""
+    reply = (
+        "Scope has no line about cooking.\n"
+        "\n"
+        "The Scope section excludes recipes.\n"
+        "1. b is a recipe; delete it.\n"
+        "VERDICT: FINDING"
+    )
+    assert wl._sweep_body(reply) == "b is a recipe; delete it."
+
+
+def test_a_flagged_page_is_never_left_without_text():
+    """scope_sweep prints the page name beside this body, but an empty body
+    still reads as an all-clear at a glance. Whatever the model wrote, some of
+    it reaches the report."""
+    for reply in ("Out of scope.\nVERDICT: FINDING",
+                  "a\n\nb\n\nc\nVERDICT: FINDING",
+                  "1. x\nVERDICT: FINDING"):
+        assert wl._sweep_body(reply)
 
 
 def test_a_page_past_the_ceiling_abandons_the_run(vault, monkeypatch):

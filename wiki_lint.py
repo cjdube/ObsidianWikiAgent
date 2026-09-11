@@ -120,9 +120,14 @@ MAX_DEEP_ITERATIONS = 120
 # whole run budget without finishing anything, and a longer budget makes that
 # worse rather than better. These bound the wedge at one page.
 #
-# 120s is twice the slowest page ever measured. Over 70 real pages on
-# qwen3.8:27b-mlx with a second model resident on the GPU: mean 17.1s, median
-# 13.5s, slowest 61.1s. A page past this ceiling is stuck, not slow.
+# 120s is well clear of any page measured so far, and a page past it is stuck
+# rather than slow. On qwen3.8:27b-mlx: 70 real pages with a second model
+# resident on the GPU gave mean 17.1s, median 13.5s, slowest 61.1s; the whole
+# 569-page vault on an idle GPU gave mean 10.0s, median 7.6s, slowest 83.8s.
+# The idle box is faster on average and has the worse tail, so the headroom
+# above the slowest page is 1.4x, not the 2x the contended numbers suggested.
+# Raise this only against a fresh slowest-page figure, and remember that
+# raising it widens the wedge these two constants exist to bound.
 #
 # Two retries because a page is one unit of work and there are hundreds of
 # them. The judgment pass gets eight for one conversation; giving each page
@@ -896,26 +901,36 @@ def _sweep_body(reply: str) -> str:
     """The finding the prompt asked for: one numbered item, directly above the
     verdict line.
 
-    Taken from the LAST numbered line for the same reason the verdict is read
-    from the end — the model reasons on its way there, and that reasoning is
-    often itself a numbered list. Run against the fixture, the whole reply
-    averaged a screenful per finding and one page argued with itself for
-    fifteen lines before answering.
+    Read from the end for the same reason the verdict is — the model reasons on
+    its way there, and that reasoning is often itself a numbered list. Two
+    rules, in this order:
 
-    When there is no numbered item the whole reply is kept instead. A parser
-    that goes looking for the finding can come back empty, and an empty finding
-    reads as a clean page — the exact false all-clear this pass exists to
-    prevent. A long finding is a nuisance; a dropped one is the bug.
+    Take the last paragraph. Reading the last numbered line of the whole reply
+    was not enough: on the 569-page run one page worked through a numbered
+    checklist of Scope lines and then concluded in prose below it, so the
+    report led with 'Is it "Meetings, social..."? No.' A conclusion that comes
+    after a blank line is the finding; the checklist above it is not.
+
+    Then, inside that paragraph, take the last numbered line. The model usually
+    writes one sentence of reasoning and the numbered item under it with no
+    blank line between, and only the numbered item belongs in the report.
+
+    Nothing is ever dropped to nothing: the verdict already said FINDING and
+    scope_sweep prints the page name beside this text, so a flagged page cannot
+    go quiet. A stray paragraph of reasoning is a nuisance; a silent page is
+    the false all-clear this pass exists to prevent.
     """
-    kept = [ln for ln in reply.strip().splitlines()
-            if not ln.strip().lstrip("*# ").rstrip("*.").upper()
-            .startswith(_VERDICT)]
-    starts = [i for i, ln in enumerate(kept) if _NUMBERED.match(ln)]
+    kept = "\n".join(
+        ln for ln in reply.strip().splitlines()
+        if not ln.strip().lstrip("*# ").rstrip("*.").upper()
+        .startswith(_VERDICT)
+    ).strip()
+    last = re.split(r"\n\s*\n", kept)[-1].strip().splitlines()
+    starts = [i for i, ln in enumerate(last) if _NUMBERED.match(ln)]
     if starts:
-        item = kept[starts[-1]:]
-        item[0] = _NUMBERED.sub("", item[0])
-        return "\n".join(item).strip()
-    return "\n".join(kept).strip()
+        last = last[starts[-1]:]
+        last[0] = _NUMBERED.sub("", last[0])
+    return "\n".join(last).strip()
 
 
 def scope_sweep(pages: dict[str, str], rules: str,
