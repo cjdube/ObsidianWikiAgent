@@ -57,58 +57,17 @@ sys.path.insert(0, str(REPO))
 
 from agent.loop import complete_text  # noqa: E402
 from agent.wiki_tools import list_wiki_pages, read_wiki_page  # noqa: E402
-
-CLEAN, FINDING, UNPARSED = "CLEAN", "FINDING", "UNPARSED"
-VERDICT = "VERDICT:"
-
-# The verdict goes LAST, and that ordering is the whole trick. Forcing it onto
-# the first line made the model commit before it reasoned: with think=False its
-# reasoning has nowhere to live but the reply, so a verdict-first prompt is a
-# guess-first prompt. Measured on the 35-page fixture, verdict-first flagged 15
-# of 35 pages and then argued itself back to CLEAN inside nine of them.
-PASS_A_WRAPPER = f"""
-
-You are auditing ONE page of this wiki. That page is below, in full. It is the
-only page you can see and the only page you may judge.
-
-Judge one thing only: does the Scope section above exclude this page's subject?
-
-Do NOT report contradictions, duplicate concepts, or outdated claims. Each of
-those needs a second page to compare against and you do not have one. Another
-pass does that work.
-
-Work it out in a few sentences if you need to. Then finish.
-
-The LAST line of your reply must be exactly one of these two lines:
-
-{VERDICT} {CLEAN}
-{VERDICT} {FINDING}
-
-Use {VERDICT} {FINDING} only when the Scope section excludes this page's
-subject. When it does, put one numbered item directly above that line naming
-this page, quoting the Scope line that excludes it, and giving a one-sentence
-fix.
-
-Write nothing after the verdict line."""
-
-
-def verdict_of(reply: str) -> str:
-    """CLEAN, FINDING or UNPARSED, read from the last verdict line.
-
-    Scanned from the end because the model reasons on its way there and may
-    use both words while doing so. Anything without a verdict line is UNPARSED
-    on purpose: guessing a verdict out of prose is how a sweep starts
-    reporting pages it never really judged.
-    """
-    for line in reversed(reply.strip().splitlines()):
-        line = line.strip().lstrip("*# ").rstrip("*.")
-        if line.upper().startswith(VERDICT):
-            answer = line[len(VERDICT):].strip().upper()
-            if answer.startswith(FINDING):
-                return FINDING
-            if answer.startswith(CLEAN):
-                return CLEAN
-    return UNPARSED
+# The prompt and the parser are imported, never copied. A copy would let this
+# tool measure one thing while the weekly job ran another, which is how the
+# 7.6s/page figure in the handoff brief came to describe a prompt that no
+# longer existed.
+from wiki_lint import (  # noqa: E402
+    SCOPE_SWEEP_WRAPPER as PASS_A_WRAPPER,
+    SWEEP_CLEAN as CLEAN,
+    SWEEP_FINDING as FINDING,
+    SWEEP_UNPARSED as UNPARSED,
+    verdict_of,
+)
 
 
 def slice_of(vault: Path, limit: int) -> list[str]:

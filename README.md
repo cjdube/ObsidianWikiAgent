@@ -366,8 +366,11 @@ Once a vault is set up and scheduled, this is the actual workflow:
    for by name — `install.sh` with no job named installs `ingest` and
    `snapshot` only — because the audit is only worth scheduling once a vault
    has grown past the point where reading every page by hand is realistic.
-   The setup this was built against runs Sunday 10:00, after that morning's
-   ingest, and lands its report in `logs/<vault-name>-lint.launchd.log`. The
+   The setup this was built against runs Sunday 22:00 and lands its report in
+   `logs/<vault-name>-lint.launchd.log`. Late on purpose: `--deep` sweeps every
+   page with one model call each, Ollama serves one request at a time, and a
+   few hundred pages turn that into hours that would otherwise queue in front
+   of everything else. The
    template sets no provider, so this pass runs on the local model like
    everything else. It is still the one job where model quality decides
    whether the findings are worth reading, and so the one worth pointing at a

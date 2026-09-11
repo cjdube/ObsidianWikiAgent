@@ -312,6 +312,77 @@ each model uses its own default, and `qwen3.8:27b-mlx` thinks by default. The
 open question is whether turning it off recovers wall clock without costing
 recall.
 
+### Scope sweep added to the deep pass — Active, 2026-09-11
+
+`--deep` now runs two passes. The judgment pass is unchanged and still samples.
+Ahead of it, a scope sweep makes one model call per page with the page's text
+supplied by Python and no read tool offered, so coverage is a property of a
+for-loop rather than of the model's diligence.
+
+What forced it: against a 70-page slice of the live vault the judgment pass
+opened **24 of 70**, reported the wiki clean, and stopped with 86 tool calls
+and 20 minutes of budget unspent. Nothing stopped it; it believed it was done.
+Slicing the vault does not fix that — slicing changes what the model *can*
+read, and the defect is what it *chooses* to read.
+
+The sweep judges one category, not four. Every `outdated` defect in
+[`tools/lint_defects/seed.json`](../tools/lint_defects/seed.json) names a
+different superseding page, so nine of the twelve planted defects are pairwise.
+The judgment pass remains the only thing looking for contradictions, duplicate
+concepts and outdated claims.
+
+Measured on the 35-page fixture, three trials:
+
+| trial | out_of_scope recall of 3 | flagged | unreadable | seconds |
+|---|---|---|---|---|
+| 1 | 3 | 6 | 0 | 307 |
+| 2 | 3 | 6 | 0 | 320 |
+| 3 | 3 | 5 | 0 | 404 |
+
+Recall did not vary. The judgment pass on Tier B scored 6, 3, 5, 3, 3, 5 across
+six trials and had to be quoted as "about four". Zero false positives in 105
+page judgments.
+
+Over 70 real vault pages: 70 of 70 swept, mean 17.1s/page, median 13.5s,
+slowest 61.1s, one flag, zero unreadable. That is **2.7 hours at 569 pages**,
+and an upper bound — `ollama ps` showed a second model resident on the GPU for
+the whole run and nothing in this work loaded it. Re-time on an idle box before
+trusting the number for anything but sizing.
+
+Two findings worth not rediscovering:
+
+**The verdict must go last.** With `think=False` the model's reasoning has
+nowhere to live but the reply, so demanding a verdict on line one demands a
+guess. Verdict-first flagged 15 of 35 fixture pages and then argued itself back
+to clean inside nine of them. Verdict-last on the same fixture: 3 of 3, zero
+false positives.
+
+**`think=False` is what makes this affordable.** It answers the open question
+at the end of the previous section, for this pass only: reasoning cost 46s a
+page against 0.4s with it off, and recall held at 3 of 3. The tokens never
+reach the usage ledger, so the only symptom of a regression is wall clock.
+`complete_text` gained the argument for this; `run_agent` always had it, and
+the judgment pass still passes nothing and still uses each model's default.
+
+Consequences, all landed together:
+
+- `DEEP_RUN_BUDGET_MINUTES` 30 to 240. 30 was sized for one conversation.
+- The weekly job moved from Sunday 10:00 to Sunday 22:00. Ollama serves one
+  request at a time, so hours of sweep at 10:00 queue in front of everything
+  else on the box.
+- `SWEEP_PAGE_CEILING_SECONDS = 120` and `MAX_SWEEP_RETRIES = 2`. Once the run
+  budget is four hours it can no longer be the thing that catches a wedged
+  server; a per-page ceiling catches it in two minutes. 120s is twice the
+  slowest page ever measured.
+- One log line per page. A pass that can run for hours is indistinguishable
+  from a wedged one if it is silent.
+
+Open: the judgment pass's prompt still asks for out-of-scope pages, so the two
+passes overlap on one category. Removing it is the obvious tidy, and it is an
+unmeasured prompt change to a pass whose recall is already unstable — measure
+before touching it. Also watch the flag rate: one per 70 pages is readable, and
+the sweep is only useful while someone will actually read every flag.
+
 ## End-to-end verification
 
 ### Test ingest changes on a fresh vault copy — Active

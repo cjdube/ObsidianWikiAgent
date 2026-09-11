@@ -18,11 +18,18 @@ Two passes, split by what each is actually good at:
   orphaned index in the first place (see update_index in agent/wiki_tools.py),
   so these run as code: instant, free, and they cannot miss one.
 
-  --deep adds a model pass for the checks code cannot do: contradictions
-  between pages, two pages covering one concept under different names, pages
-  whose subject is out of scope, and claims a newer source has overtaken. The
-  model receives the structural findings as context so it does not re-derive
-  them.
+  --deep adds the checks code cannot do: contradictions between pages, two
+  pages covering one concept under different names, pages whose subject is out
+  of scope, and claims a newer source has overtaken. Both its passes receive
+  the structural findings as context so they do not re-derive them.
+
+  It runs two passes, split by how many pages a check needs at once. The scope
+  sweep asks about one page per call and Python supplies the text, so it reads
+  every page and answers the one question a single page can settle: is this
+  subject out of scope. The judgment pass then searches and reads for itself,
+  which is the only way to see the other three — they all need a second page to
+  compare against, outdated claims included. That pass samples rather than
+  sweeps, and says so in its own coverage line.
 
 The prose report goes to stdout, for a human. Alongside it the run is logged
 through setup_logger like the ingest and snapshot jobs are — run boundaries,
@@ -48,11 +55,12 @@ import functools
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 from agent import budget
 from agent.common import setup_logger, trim_launchd_log
-from agent.loop import INCOMPLETE_PREFIX, run_agent
+from agent.loop import INCOMPLETE_PREFIX, complete_text, run_agent
 from agent.notify import notify_failure
 from agent.wiki_tools import (
     LIST_WIKI_PAGES_SCHEMA,
@@ -81,10 +89,20 @@ from agent.wikilinks import (
 
 # Bounds for the --deep pass only. This is a scheduled unattended job against a
 # provider that can be slow or down, and 120 iterations x 5 HTTP attempts is the
-# same unbounded product that had wiki_ingest retrying for three hours. Smaller
-# than the ingest's 45 minutes because this is one conversation, not a queue of
-# sources: the pass normally costs a couple of minutes.
-DEEP_RUN_BUDGET_MINUTES = 30
+# same unbounded product that had wiki_ingest retrying for three hours.
+#
+# Raised from 30 on 2026-09-11, when the scope sweep joined this pass. 30 was
+# sized for one conversation costing a couple of minutes. The sweep is one call
+# per page: measured at 17.1s a page over 70 real pages with a second model
+# resident on the GPU, which is 2.7 hours at 569 pages. The job moved from
+# Sunday 10:00 to Sunday 22:00 so those hours fall where nothing competes for
+# the one Ollama slot — see launchd/local.wikiagent.learnings-lint.plist.
+#
+# Because the number got big it stopped being what catches a wedged server.
+# SWEEP_PAGE_CEILING_SECONDS does that now, in two minutes rather than four
+# hours. This is the outer stop for a run that is merely far slower than it has
+# ever been measured to be.
+DEEP_RUN_BUDGET_MINUTES = 240
 MAX_DEEP_RETRIES = 8
 
 # Raised from 60 on 2026-09-03. At 60, three of three measured Gemini passes
@@ -95,6 +113,23 @@ MAX_DEEP_RETRIES = 8
 # and DEEP_RUN_BUDGET_MINUTES still stops a wedged run. This bounds sampling
 # effort, not thoroughness: the pass samples the vault, it does not sweep it.
 MAX_DEEP_ITERATIONS = 120
+
+# Bounds for the scope sweep only. A per-run deadline cannot protect the shared
+# Ollama slot here the way it protects one conversation: the sweep is 569
+# separate calls, so a server that wedges on call three would sit inside the
+# whole run budget without finishing anything, and a longer budget makes that
+# worse rather than better. These bound the wedge at one page.
+#
+# 120s is twice the slowest page ever measured. Over 70 real pages on
+# qwen3.8:27b-mlx with a second model resident on the GPU: mean 17.1s, median
+# 13.5s, slowest 61.1s. A page past this ceiling is stuck, not slow.
+#
+# Two retries because a page is one unit of work and there are hundreds of
+# them. The judgment pass gets eight for one conversation; giving each page
+# eight would restore exactly the unbounded product agent/budget.py exists to
+# stop.
+SWEEP_PAGE_CEILING_SECONDS = 120
+MAX_SWEEP_RETRIES = 2
 
 LINT_WRAPPER = """
 
@@ -117,6 +152,52 @@ Report findings as a numbered list, each naming the specific pages and a
 suggested fix. Report only
 what you actually verified by reading the pages — if you find nothing in a
 category, say so rather than inventing something. Do not write to the wiki."""
+
+
+SWEEP_CLEAN, SWEEP_FINDING, SWEEP_UNPARSED = "CLEAN", "FINDING", "UNPARSED"
+_VERDICT = "VERDICT:"
+
+# Pass A. One page per call, the page's text supplied by the caller, no read
+# tool offered — so "every page was judged" is a property of a for-loop rather
+# than a claim about the model's diligence. LINT_WRAPPER's pass samples: over a
+# 70-page slice it opened 24 of 70, called the wiki clean, and stopped with 20
+# minutes of its budget unspent.
+#
+# ONE CATEGORY, NOT FOUR. Only out-of-scope survives being shown a single page.
+# Contradictions and duplicates obviously need two, and so do outdated claims:
+# every `outdated` defect in tools/lint_defects/seed.json names a DIFFERENT
+# superseding page. Nine of those twelve planted defects are pairwise, which is
+# why LINT_WRAPPER's pass is not replaced by this one.
+#
+# THE VERDICT GOES LAST, and that ordering is the whole trick. think=False
+# leaves the model's reasoning nowhere to live but the reply, so demanding the
+# verdict on line one is demanding a guess: measured that way it flagged 15 of
+# 35 fixture pages and then argued itself back to clean inside nine of them.
+# Verdict-last on the same fixture: 3 of 3 recall, zero false positives.
+SCOPE_SWEEP_WRAPPER = f"""
+
+You are auditing ONE page of this wiki. That page is below, in full. It is the
+only page you can see and the only page you may judge.
+
+Judge one thing only: does the Scope section above exclude this page's subject?
+
+Do NOT report contradictions, duplicate concepts, or outdated claims. Each of
+those needs a second page to compare against and you do not have one. Another
+pass does that work.
+
+Work it out in a few sentences if you need to. Then finish.
+
+The LAST line of your reply must be exactly one of these two lines:
+
+{_VERDICT} {SWEEP_CLEAN}
+{_VERDICT} {SWEEP_FINDING}
+
+Use {_VERDICT} {SWEEP_FINDING} only when the Scope section excludes this page's
+subject. When it does, put one numbered item directly above that line naming
+this page, quoting the Scope line that excludes it, and giving a one-sentence
+fix.
+
+Write nothing after the verdict line."""
 
 
 # MEASURED 2026-09-11. This is the one deviation from QUERY_TOOL_SCHEMAS, and
@@ -784,6 +865,136 @@ def _render(findings: dict[str, list[str]]) -> tuple[str, int]:
     return "\n".join(lines), n
 
 
+def verdict_of(reply: str) -> str:
+    """SWEEP_CLEAN, SWEEP_FINDING or SWEEP_UNPARSED, from the last verdict line.
+
+    Scanned from the end because the model reasons on its way there and may use
+    both words while doing so; reading the first line scored nine in-scope
+    fixture pages as scope violations.
+
+    A reply with no verdict line is SWEEP_UNPARSED on purpose and is never
+    folded into clean. A sweep that treats prose it could not read as a clean
+    page prints exactly the false all-clear this whole design exists to stop —
+    and on the first measured run three of ten flagged replies were the model
+    reasoning its way to clean without ever saying so.
+    """
+    for line in reversed(reply.strip().splitlines()):
+        line = line.strip().lstrip("*# ").rstrip("*.")
+        if line.upper().startswith(_VERDICT):
+            answer = line[len(_VERDICT):].strip().upper()
+            if answer.startswith(SWEEP_FINDING):
+                return SWEEP_FINDING
+            if answer.startswith(SWEEP_CLEAN):
+                return SWEEP_CLEAN
+    return SWEEP_UNPARSED
+
+
+_NUMBERED = re.compile(r"^\s*\d+[.)]\s+")
+
+
+def _sweep_body(reply: str) -> str:
+    """The finding the prompt asked for: one numbered item, directly above the
+    verdict line.
+
+    Taken from the LAST numbered line for the same reason the verdict is read
+    from the end — the model reasons on its way there, and that reasoning is
+    often itself a numbered list. Run against the fixture, the whole reply
+    averaged a screenful per finding and one page argued with itself for
+    fifteen lines before answering.
+
+    When there is no numbered item the whole reply is kept instead. A parser
+    that goes looking for the finding can come back empty, and an empty finding
+    reads as a clean page — the exact false all-clear this pass exists to
+    prevent. A long finding is a nuisance; a dropped one is the bug.
+    """
+    kept = [ln for ln in reply.strip().splitlines()
+            if not ln.strip().lstrip("*# ").rstrip("*.").upper()
+            .startswith(_VERDICT)]
+    starts = [i for i, ln in enumerate(kept) if _NUMBERED.match(ln)]
+    if starts:
+        item = kept[starts[-1]:]
+        item[0] = _NUMBERED.sub("", item[0])
+        return "\n".join(item).strip()
+    return "\n".join(kept).strip()
+
+
+def scope_sweep(pages: dict[str, str], rules: str,
+                logger=None) -> tuple[list[str], list[str], dict[str, int]]:
+    """Judge every page against the Scope section. Returns (findings,
+    unreadable page slugs, verdict counts).
+
+    Runs before the judgment pass because it is the deterministic half of the
+    report and reads better first. It is not insurance against the budget: a
+    wedge dies at SWEEP_PAGE_CEILING_SECONDS, and a sweep that legitimately
+    outruns DEEP_RUN_BUDGET_MINUTES has been sized wrong, not unlucky.
+    """
+    system_prompt = rules + SCOPE_SWEEP_WRAPPER
+    findings: list[str] = []
+    unreadable: list[str] = []
+    counts = {SWEEP_CLEAN: 0, SWEEP_FINDING: 0, SWEEP_UNPARSED: 0}
+
+    for i, (slug, content) in enumerate(pages.items(), 1):
+        budget.check(f"scope sweep at {slug}")
+        # Each page is its own unit of work for the retry ceiling. Counting
+        # retries across the whole sweep would let a wedged server stay under
+        # every per-call cap while the total ran to hundreds, which is the
+        # failure agent/budget.py was written for.
+        budget.start_source(f"scope sweep: {slug}", MAX_SWEEP_RETRIES)
+        started = time.monotonic()
+        reply = complete_text(
+            system_prompt=system_prompt,
+            user_prompt=f"Page: {slug}\n\n{content}",
+            logger=logger,
+            # See agent/loop._run_ollama. Measured 2026-09-11, reasoning cost
+            # 46s a page against 0.4s with it off. The stage-1 warning there
+            # does not transfer: that failure was a model not calling a tool,
+            # and this call offers none.
+            think=False,
+        ).strip()
+        spent = time.monotonic() - started
+        if spent > SWEEP_PAGE_CEILING_SECONDS:
+            raise budget.BudgetExceeded(
+                f"scope sweep spent {spent:.0f}s on '{slug}', past the "
+                f"{SWEEP_PAGE_CEILING_SECONDS}s page ceiling"
+            )
+
+        verdict = verdict_of(reply)
+        counts[verdict] += 1
+        # One line per page, because this pass can run for hours and the log is
+        # the only thing anyone can look at while it does. Without it a working
+        # sweep and a wedged one look identical from outside: silence. INFO,
+        # like every other lint line — LocalLLMAgent's log_inspector reports
+        # WARNINGs, and normal progress is not an alert.
+        if logger:
+            logger.info(
+                f"Scope sweep {i}/{len(pages)} {verdict} {slug} ({spent:.1f}s)"
+            )
+        if verdict == SWEEP_FINDING:
+            findings.append(f"{slug} — {_sweep_body(reply)}")
+        elif verdict == SWEEP_UNPARSED:
+            unreadable.append(slug)
+
+    return findings, unreadable, counts
+
+
+def _sweep_line(counts: dict[str, int]) -> str:
+    """One sentence saying what the sweep covered and what it did not.
+
+    Separate from scope_sweep so the wording is testable without a model run,
+    for the same reason _coverage_line is. The second sentence is the point:
+    this pass sweeps, but it sweeps one of the four judgment categories, and a
+    report that said only "swept 569 of 569" would be read as all four.
+    """
+    swept = sum(counts.values())
+    line = f"Scope sweep read {swept} of {swept} pages. Out-of-scope check only."
+    if counts[SWEEP_UNPARSED]:
+        line += (
+            f" {counts[SWEEP_UNPARSED]} gave no readable verdict and were NOT "
+            f"judged."
+        )
+    return line
+
+
 def _coverage_line(read: int, total: int) -> str:
     """One sentence saying how much of the vault the judgment pass saw.
 
@@ -866,6 +1077,25 @@ def _lint(args, rules_path: Path, logger) -> int:
             logger.info(f"{section}: {len(items)}")
 
     if args.deep:
+        rules = rules_path.read_text(encoding="utf-8")
+
+        print("\n---\n\n## Scope sweep\n")
+        sweep_findings, unreadable, counts = scope_sweep(pages, rules, logger)
+        for i, finding in enumerate(sweep_findings, 1):
+            print(f"{i}. {finding}\n")
+        if not sweep_findings:
+            print("No out-of-scope pages found.\n")
+        if unreadable:
+            # Named, not just counted. These are the pages nobody judged, and a
+            # number alone gives a reader no way to go and judge them.
+            print(f"No readable verdict: {', '.join(unreadable)}\n")
+        print(_sweep_line(counts))
+        logger.info(
+            f"Scope sweep: {sum(counts.values())} pages, "
+            f"{counts[SWEEP_FINDING]} finding{'' if counts[SWEEP_FINDING] == 1 else 's'}, "
+            f"{counts[SWEEP_UNPARSED]} unreadable"
+        )
+
         print("\n---\n\n## Judgment pass\n")
         context = report if count else "The structural pass found no problems."
         dispatch = lint_dispatch(args.vault)
@@ -877,7 +1107,7 @@ def _lint(args, rules_path: Path, logger) -> int:
         # logger= gives the run a tool-call timeline (`tool_call name(args) ->
         # result`), which is the shape LocalLLMAgent's dashboard renders.
         judgment = run_agent(
-            system_prompt=rules_path.read_text(encoding="utf-8") + LINT_WRAPPER
+            system_prompt=rules + LINT_WRAPPER
             + "\n\nStructural findings already reported (do not repeat these):\n"
             + context,
             user_prompt="Audit the wiki and report your findings.",

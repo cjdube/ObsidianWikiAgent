@@ -779,6 +779,13 @@ def test_main_pushes_an_alert_when_the_run_crashes(vault, monkeypatch):
     assert "disk" in pushed[0][1]
 
 
+def _clean_sweep(monkeypatch):
+    """Stub the scope sweep's one model call so a --deep test exercises the
+    judgment pass without 569 HTTP requests. It answers clean, because these
+    tests are about the pass around it, not about the verdict."""
+    monkeypatch.setattr(wl, "complete_text", lambda **kw: "VERDICT: CLEAN")
+
+
 def test_deep_pass_gives_the_judgment_agent_its_full_iteration_allowance(vault, monkeypatch):
     """A literal here regressed once already: at 60 the pass ran out of tool
     calls and returned [incomplete] instead of a report, so the allowance is a
@@ -791,6 +798,7 @@ def test_deep_pass_gives_the_judgment_agent_its_full_iteration_allowance(vault, 
         seen.update(kw)
         return "no findings"
 
+    _clean_sweep(monkeypatch)
     monkeypatch.setattr(wl, "run_agent", _capture)
     monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
     wl.main()
@@ -810,6 +818,7 @@ def test_main_starts_a_budget_only_for_the_deep_pass(vault, monkeypatch):
     wl.main()
     assert budget.remaining() is None
 
+    _clean_sweep(monkeypatch)
     monkeypatch.setattr(wl, "run_agent", lambda **kw: "no findings")
     monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
     wl.main()
@@ -829,6 +838,7 @@ def test_main_turns_an_exhausted_budget_into_an_alert(vault, monkeypatch):
     def _wedged(**kwargs):
         raise budget.BudgetExceeded("run budget exhausted before model request")
 
+    _clean_sweep(monkeypatch)
     monkeypatch.setattr(wl, "run_agent", _wedged)
     vault.page("a", good_page())
     vault.index("# Index\n\n- [[a]] s.\n")
@@ -844,11 +854,203 @@ def test_main_treats_incomplete_deep_judgment_as_failure(vault, monkeypatch):
     monkeypatch.setattr(wl, "notify_failure", lambda *a, **k: pushed.append(1))
     vault.page("a", good_page())
     vault.index("# Index\n\n- [[a]] s.\n")
+    _clean_sweep(monkeypatch)
     monkeypatch.setattr(wl, "run_agent", lambda **kw: "[incomplete: hit max_iterations=60 tool calls without reaching a final answer]")
     monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
 
     assert wl.main() == 1
     assert pushed == [1]
+
+
+# --- the scope sweep (Pass A) -----------------------------------------------
+#
+# The sweep exists because the judgment pass samples. Measured 2026-09-11 over
+# a 70-page slice of the live vault it opened 24 of 70, reported the wiki
+# clean, and stopped with 20 minutes of budget unspent. These pin the parts
+# that make "every page was judged" true rather than merely claimed.
+
+
+def _sweep_vault(vault, n=3):
+    names = [chr(ord("a") + i) for i in range(n)]
+    for name in names:
+        vault.page(name, good_page())
+    vault.index("# Index\n\n" + "".join(f"- [[{x}]] s.\n" for x in names))
+    return names
+
+
+def test_the_sweep_judges_every_page_not_a_sample(vault, monkeypatch):
+    """The whole point. One call per page, driven by a for-loop, so coverage
+    cannot depend on the model deciding it has seen enough."""
+    names = _sweep_vault(vault, 5)
+    judged = []
+
+    def _fake(*, user_prompt, **kw):
+        judged.append(user_prompt.splitlines()[0])
+        return "VERDICT: CLEAN"
+
+    monkeypatch.setattr(wl, "complete_text", _fake)
+    monkeypatch.setattr(wl, "run_agent", lambda **kw: "no findings")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+    wl.main()
+
+    assert judged == [f"Page: {n}" for n in names]
+
+
+def test_the_sweep_turns_thinking_off(vault, monkeypatch):
+    """Measured 2026-09-11 on qwen3.8:27b-mlx: 46s a page with reasoning, 0.4s
+    without — 7.3 hours against 72 minutes over this vault. The tokens never
+    reach the usage ledger, so a regression here shows up only as wall clock."""
+    _sweep_vault(vault, 1)
+    seen = {}
+
+    def _fake(**kw):
+        seen.update(kw)
+        return "VERDICT: CLEAN"
+
+    monkeypatch.setattr(wl, "complete_text", _fake)
+    monkeypatch.setattr(wl, "run_agent", lambda **kw: "no findings")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+    wl.main()
+
+    assert seen["think"] is False
+
+
+def test_an_unreadable_verdict_is_never_counted_as_clean(vault, monkeypatch, capsys):
+    """The failure this design exists to kill. A reply the parser cannot read
+    is a page nobody judged, and folding it into the clean count prints the
+    same false all-clear as not reading the page at all — so the report has to
+    name it."""
+    _sweep_vault(vault, 2)
+    replies = iter(["VERDICT: CLEAN", "The page looks fine to me."])
+
+    monkeypatch.setattr(wl, "complete_text", lambda **kw: next(replies))
+    monkeypatch.setattr(wl, "run_agent", lambda **kw: "no findings")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+    wl.main()
+
+    out = capsys.readouterr().out
+    assert "No readable verdict: b" in out
+    assert "1 gave no readable verdict and were NOT judged." in out
+
+
+def test_the_sweep_reports_the_pages_it_flagged(vault, monkeypatch, capsys):
+    _sweep_vault(vault, 2)
+    replies = iter([
+        "VERDICT: CLEAN",
+        "The Scope section excludes recipes.\n1. b is a recipe; delete it.\n"
+        "VERDICT: FINDING",
+    ])
+
+    monkeypatch.setattr(wl, "complete_text", lambda **kw: next(replies))
+    monkeypatch.setattr(wl, "run_agent", lambda **kw: "no findings")
+    monkeypatch.setattr("sys.argv", _lint_argv(vault, "--deep"))
+    wl.main()
+
+    out = capsys.readouterr().out
+    assert "## Scope sweep" in out
+    assert "1. b — b is a recipe; delete it." in out
+    # Neither the bookkeeping line nor the reasoning is part of the finding a
+    # human reads weekly.
+    assert "VERDICT:" not in out
+    assert "excludes recipes" not in out
+
+
+def test_the_finding_is_the_last_numbered_item_not_the_first():
+    """The model reasons on its way to the answer and that reasoning is often
+    itself a numbered list. Taken from the fixture, where this page's reasoning
+    numbered three topics before naming the finding."""
+    reply = (
+        "The page covers three topics.\n"
+        "1. Quantized build: in scope.\n"
+        "2. Reranker swap: in scope.\n"
+        "3. Volunteer day: excluded.\n"
+        "\n"
+        "1. Page b includes a volunteer day section; remove it.\n"
+        "VERDICT: FINDING"
+    )
+    assert wl._sweep_body(reply) == "Page b includes a volunteer day section; remove it."
+
+
+def test_a_finding_with_no_numbered_item_is_kept_whole():
+    """A parser that goes looking for the finding can come back empty, and an
+    empty finding reads as a clean page. Verbose beats missing."""
+    reply = "This page is about catering, which the Scope excludes.\nVERDICT: FINDING"
+    assert wl._sweep_body(reply) == (
+        "This page is about catering, which the Scope excludes."
+    )
+
+
+def test_a_page_past_the_ceiling_abandons_the_run(vault, monkeypatch):
+    """A per-run deadline cannot protect the shared Ollama slot across 569
+    separate calls: a server that wedges on call three sits inside the whole
+    budget without finishing anything. The ceiling catches that at one page."""
+    from agent import budget
+
+    _sweep_vault(vault, 2)
+    clock = iter([0.0, wl.SWEEP_PAGE_CEILING_SECONDS + 1])
+    monkeypatch.setattr(wl.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(wl, "complete_text", lambda **kw: "VERDICT: CLEAN")
+
+    with pytest.raises(budget.BudgetExceeded) as e:
+        wl.scope_sweep({"a": "x", "b": "y"}, "rules")
+    assert "'a'" in str(e.value)
+
+
+def test_each_page_gets_its_own_retry_ceiling(vault, monkeypatch):
+    """Counting retries across the whole sweep would let a wedged server stay
+    under every per-call cap while the total ran to hundreds — the exact
+    product agent/budget.py was written to stop."""
+    from agent import budget
+
+    started = []
+    monkeypatch.setattr(
+        budget, "start_source",
+        lambda name, retries: started.append((name, retries)),
+    )
+    monkeypatch.setattr(wl, "complete_text", lambda **kw: "VERDICT: CLEAN")
+
+    wl.scope_sweep({"a": "x", "b": "y"}, "rules")
+
+    assert started == [
+        ("scope sweep: a", wl.MAX_SWEEP_RETRIES),
+        ("scope sweep: b", wl.MAX_SWEEP_RETRIES),
+    ]
+
+
+def test_the_sweep_logs_every_page_as_it_goes(monkeypatch):
+    """This pass can run for hours and the log is the only thing anyone can
+    look at while it does. With no progress line a working sweep and a wedged
+    one are both just silence."""
+    logged = []
+
+    class _Log:
+        def info(self, line):
+            logged.append(line)
+
+    monkeypatch.setattr(wl, "complete_text", lambda **kw: "VERDICT: CLEAN")
+    wl.scope_sweep({"a": "x", "b": "y"}, "rules", _Log())
+
+    assert len(logged) == 2
+    assert logged[0].startswith("Scope sweep 1/2 CLEAN a")
+    assert logged[1].startswith("Scope sweep 2/2 CLEAN b")
+
+
+def test_the_sweep_line_says_it_covers_one_category(vault):
+    """"Swept 569 of 569" alone reads as all four judgment checks. Three of the
+    four need a second page, and this pass holds one."""
+    line = wl._sweep_line({wl.SWEEP_CLEAN: 8, wl.SWEEP_FINDING: 1,
+                           wl.SWEEP_UNPARSED: 0})
+    assert "9 of 9 pages" in line
+    assert "Out-of-scope check only." in line
+    assert "NOT judged" not in line
+
+
+def test_the_sweep_line_admits_pages_it_could_not_judge(vault):
+    line = wl._sweep_line({wl.SWEEP_CLEAN: 7, wl.SWEEP_FINDING: 0,
+                           wl.SWEEP_UNPARSED: 2})
+    assert "8 of 8" not in line
+    assert "9 of 9 pages" in line
+    assert "2 gave no readable verdict and were NOT judged." in line
 
 
 def test_check_format_accepts_a_citation_to_a_binary_source(vault):

@@ -19,8 +19,11 @@
      accept it anyway, so the only thing that breaks is a strict XML parser —
      LocalLLMAgent's dashboard reader dropped a job's row until it was reworded.
 
-     Runs Sunday at 10:00, after that morning's 09:00 ingest, so it audits a
-     full week of new pages.
+     Runs Sunday at 22:00, late on purpose. The deep pass sweeps every page
+     with one model call each, Ollama serves one request at a time, and a
+     vault of a few hundred pages turns that into hours; at 10:00 those hours
+     sit in front of everything else on the box. The audit covers a full week
+     wherever in the day it starts.
 
      Placeholders install.sh replaces:
        <ABSOLUTE_PATH_TO_REPO>  where you cloned this repo
@@ -55,7 +58,7 @@
         <key>Weekday</key>
         <integer>0</integer>
         <key>Hour</key>
-        <integer>10</integer>
+        <integer>22</integer>
         <key>Minute</key>
         <integer>0</integer>
     </dict>
