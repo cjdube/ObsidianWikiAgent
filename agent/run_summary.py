@@ -65,6 +65,12 @@ class RunSummary:
     outcome: str = "running"  # "complete" | "abandoned" | "failed"
     detail: str = ""
     elapsed_minutes: float = 0.0
+    # Set only by tools/backfill_run_notes.py, which rebuilds the notes for runs
+    # that finished before this module existed. A reconstructed note is not the
+    # same evidence as a recorded one — it is a reading of a log, and the log
+    # does not carry every field — so it says so on its face rather than sitting
+    # beside the real ones looking identical.
+    reconstructed_from: str = ""
 
     def add_source(self, result: SourceResult) -> None:
         self.sources.append(result)
@@ -107,6 +113,14 @@ class RunSummary:
 
         if self.detail:
             lines += [f"> {self.detail}", ""]
+
+        if self.reconstructed_from:
+            lines += [
+                f"*Reconstructed from `{self.reconstructed_from}`, not recorded "
+                "by the run itself. Out-of-scope notes are not in the log and "
+                "are missing here.*",
+                "",
+            ]
 
         if self.outcome != "complete" and self.unreached:
             lines += [
