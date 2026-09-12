@@ -12,7 +12,7 @@
      ~/Documents is TCC-protected and a launchd-spawned /bin/bash is denied
      access to it, while the interpreter that runs the ingest is not.
 
-     Runs at 23:00, deliberately NOT just after the 09:00 ingest: an ingest
+     Runs at 23:00, deliberately NOT just after the 05:00 ingest: an ingest
      with several new sources routinely takes one to three hours, so an
      early-morning snapshot would usually fire mid-run and commit a
      half-ingested vault — pages written but index.md and log.md not yet
