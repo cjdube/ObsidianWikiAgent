@@ -79,6 +79,20 @@ On 2026-08-21, 41 damaged lines across 23 pages were repaired. Four occurrences 
 
 Commit `00ddbc4` closed the ingest boundary gap in `_decode_if_escaped`; commits `680ed3c` and `88fd956` added lint detection and `--fix`. The ingest guard, detector, and fixer share `_quotes_outside_json`, so their definition cannot drift. Scheduled lint uses `--deep`, not `--fix`; repair remains explicit. Treat any old report of this defect as historical until current lint reproduces it.
 
+### Run summary notes live outside the wiki — Active, 2026-09-12
+
+The ingest wrote one line at the end of a run, `Wiki ingest run complete`, into a launchd log nobody opens. Every fact worth reporting was already in memory and discarded: the create/update split computed for the stage-3 prompt, the `done`/`failed` page lists, the `processed`/`failures` counts read only to pick an exit code, and `started`, which was consulted only when the budget blew.
+
+`agent/run_summary.py` accumulates those facts during the run rather than parsing them back out afterwards. `tools/measure_stage2.py` parses logs because it had to reconstruct runs that were already over; anything asked of a live run is recorded, because a parser goes stale the moment a log string is reworded.
+
+The note lands at `<vault>/runs/<date>.md`, beside the wiki and not inside it. Every tool the model is given resolves under `raw/` or `wiki/` (`agent/wiki_tools.py` `_raw_dir`/`_wiki_dir`), and `wiki_lint` walks `wiki/` only. That is what keeps the note out of prompts, out of the index, out of lint findings, and out of the page count — the same reason the vault already keeps `correspondence/`, `nudges/` and `templates/` outside `wiki/`. Do not move it under `wiki/`, and do not give the model a tool that reads it.
+
+Three properties are load-bearing. The note is written from a `finally`, so abandoned and crashed runs — the ones previously silent — produce one too. A failure to write it is caught and logged as a warning, so vault bookkeeping cannot change a run's exit code. And its log block avoids the phrases `tools/measure_stage2.py` anchors on, since reusing one would silently double every count that script reports; `tests/test_run_summary.py` pins this against the script's own regexes.
+
+A fourth property covers the run that stops mid-source. The budget watchdog raises `BudgetExceeded` from a SIGALRM handler, so it lands wherever the process happens to be — including after `write_wiki_page` put a page on disk and before `_execute_unit` returned, which is the only moment `_ingest_source` appends to `done`. A real 3-minute-budget run on a disposable copy lost a page exactly that way: the file was written at 06:23:21, the abort was logged at 06:23:21,501, and the note reported nothing for it. `_WriteCounter.landed()` now tells `_ingest_source` at the moment the write succeeds, and the `BudgetExceeded` handler reports those pages minus anything already counted as done or failed. Recording a landed page anywhere later than the write itself reopens this gap.
+
+Tokens and cost are deliberately absent. `agent/usage_ledger.py` states that nothing in this repository reads `logs/usage.jsonl`, and that remains true.
+
 ## Performance reference
 
 ### Local model measurements — Historical

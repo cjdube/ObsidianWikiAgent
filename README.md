@@ -62,6 +62,8 @@ launchd (per-vault .plist, timed)
           3. log     append_log, once, for the whole source
        -> marks it ingested only if every planned page landed, and logs
           everything to logs/wiki_ingest.<vault>.log
+       -> writes <vault>/runs/<date>.md — what the run created, updated
+          and failed on, and which sources it left for next time
 ```
 
 ### Why the ingest is three stages and not one loop
@@ -282,9 +284,23 @@ Once a vault is set up and scheduled, this is the actual workflow:
    ```bash
    .venv/bin/python wiki_ingest.py --vault ~/Vaults/llm-wiki-learnings
    ```
-3. **Check what it did.** `<vault>/wiki/log.md` is the agent's own account of
-   what it read, what it changed, and any judgment calls it made (it runs
-   unattended, so it never stops to ask). Read it as a summary, not as
+3. **Check what it did.** `<vault>/runs/<date>.md` is the first thing to
+   read: one block per run, written by Python from what the run actually did.
+   It gives the headline — sources ingested, pages created, pages updated,
+   pages failed, wall clock — then names the pages under each source, and says
+   which sources were left unmarked for the next run to redo. Runs that were
+   abandoned on budget or crashed write one too; those are the ones worth
+   reading. A run that found nothing pending says so, which is how an upstream
+   job that stopped producing sources becomes visible.
+
+   `runs/` sits beside `wiki/`, not inside it, and that is load-bearing: every
+   tool the model is given resolves under `raw/` or `wiki/`, and `wiki_lint`
+   walks `wiki/` only. So a run note can never reach a prompt, the index, or a
+   lint finding, and it does not count toward the vault's page total.
+
+   `<vault>/wiki/log.md` is the agent's own account of what it read, what it
+   changed, and any judgment calls it made (it runs unattended, so it never
+   stops to ask). Read it as a summary, not as
    evidence: the model writes it, so it is only as reliable as the run that
    produced it. `logs/wiki_ingest.<vault-name>.log` is the record Python
    writes — one line per tool call, with its arguments and result — and it is

@@ -4,7 +4,7 @@ run_agent is mocked throughout — these cover which sources get attempted,
 marked, and abandoned, not what the model produces.
 """
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -904,3 +904,379 @@ def test_a_wrong_page_is_refused_through_the_argument_the_tool_names(vault):
     assert "colima" in error
     assert "page='colima'" in error
     assert not writes
+
+
+# --- run summary -----------------------------------------------------------
+
+
+def _summary(vault, minutes=45):
+    from agent.run_summary import RunSummary
+
+    return RunSummary(
+        vault=vault.path, started_at=datetime(2026, 9, 12, 5, 0), budget_minutes=minutes
+    )
+
+
+def test_a_run_records_what_it_created_and_updated(vault, monkeypatch):
+    """The counts the run already had in hand for its log.md prompt, kept this
+    time instead of discarded."""
+    from agent.run_summary import OK
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", _stages(pages=[
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+        {"name": "beta", "action": "create", "intent": "y", "section": "S"},
+    ]))
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    assert wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary) == 0
+
+    assert summary.pending == 1
+    assert summary.ingested == 1
+    assert summary.created == ["alpha", "beta"]
+    assert summary.updated == []
+    assert summary.sources[0].filename == "one.md"
+    assert summary.sources[0].status == OK
+
+
+def test_the_split_follows_disk_not_the_plan(vault, monkeypatch):
+    """_execute_unit corrects a planned action from the file that is actually
+    there, so a page the plan called new but that already exists must be
+    reported as updated — otherwise the note claims pages the vault never
+    gained."""
+    vault.page("alpha", "# alpha\n\n**Summary**: already here\n")
+    monkeypatch.setattr(wiki_ingest, "run_agent", _stages(pages=[
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+    ]))
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    assert summary.created == []
+    assert summary.updated == ["alpha"]
+
+
+def test_a_partly_written_source_is_recorded_as_retried(vault, monkeypatch):
+    from agent.run_summary import PARTIAL
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", _stages(pages=[
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+        {"name": "beta", "action": "create", "intent": "y", "section": "S"},
+    ], fail=("beta",)))
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    source = summary.sources[0]
+    assert source.status == PARTIAL
+    assert source.created == ["alpha"]
+    assert source.failed == ["beta"]
+    assert source.retried
+    assert summary.ingested == 0
+
+
+def test_a_source_with_no_usable_plan_is_recorded(vault, monkeypatch):
+    from agent.run_summary import NO_PLAN
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", _stages(dead_stage="plan"))
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    assert summary.sources[0].status == NO_PLAN
+    assert summary.sources[0].created == []
+
+
+def test_pages_that_landed_without_a_log_entry_are_recorded(vault, monkeypatch):
+    """Stage 3 failing leaves real pages on disk and no log.md entry. The
+    source is still unmarked, so the note must not read as a clean success."""
+    from agent.run_summary import LOG_FAILED
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", _stages(dead_stage="log"))
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    source = summary.sources[0]
+    assert source.status == LOG_FAILED
+    assert source.created == ["alpha"]
+    assert source.retried
+
+
+def test_a_run_with_nothing_pending_still_records_the_count(vault, monkeypatch):
+    """On a vault whose raw/ is filled by a scheduled job, zero pending means
+    that job did not run. The note is the only place that shows up."""
+    monkeypatch.setattr(wiki_ingest, "run_agent", _writes)
+    summary = _summary(vault)
+
+    assert wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary) == 0
+    assert summary.pending == 0
+    assert summary.sources == []
+
+
+def test_summary_is_optional(vault, monkeypatch):
+    """Every existing caller — and every existing test — passes no summary."""
+    monkeypatch.setattr(wiki_ingest, "run_agent", _writes)
+    vault.raw("one.md", subdir="daily-notes")
+
+    assert wiki_ingest.ingest_vault(vault.path, _Logger()) == 0
+
+
+# --- the run note ----------------------------------------------------------
+
+
+def test_main_leaves_a_run_note_in_the_vault(vault, monkeypatch):
+    monkeypatch.setattr(wiki_ingest, "run_agent", _stages(pages=[
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+    ]))
+    vault.raw("one.md", subdir="daily-notes")
+    monkeypatch.setattr("sys.argv", ["wiki_ingest.py", "--vault", vault.path])
+
+    assert wiki_ingest.main() == 0
+
+    notes = list((Path(vault.path) / "runs").glob("*.md"))
+    assert len(notes) == 1
+    text = notes[0].read_text(encoding="utf-8")
+    assert "1 of 1 source(s) ingested" in text
+    assert "- created: alpha" in text
+
+
+def test_the_run_note_is_outside_the_wiki(vault, monkeypatch):
+    """Every tool the model is given resolves under raw/ or wiki/, and
+    wiki_lint walks wiki/ only. A note inside wiki/ would enter prompts, the
+    index and the lint findings; outside it, nothing can see it."""
+    monkeypatch.setattr(wiki_ingest, "run_agent", _writes)
+    vault.raw("one.md", subdir="daily-notes")
+    monkeypatch.setattr("sys.argv", ["wiki_ingest.py", "--vault", vault.path])
+    wiki_ingest.main()
+
+    assert (Path(vault.path) / "runs").is_dir()
+    assert not (Path(vault.path) / "wiki" / "runs").exists()
+    assert not list((Path(vault.path) / "wiki").glob("2026-*.md"))
+
+
+def test_an_abandoned_run_still_leaves_a_note(vault, monkeypatch):
+    """The run worth reading in the morning is the one that did not finish."""
+    monkeypatch.setattr(
+        wiki_ingest, "notify_failure", lambda job, detail, logger=None: None
+    )
+    monkeypatch.setattr(
+        wiki_ingest, "ingest_vault",
+        lambda *a, **k: (_ for _ in ()).throw(budget.BudgetExceeded("wedged")),
+    )
+    monkeypatch.setattr("sys.argv", ["wiki_ingest.py", "--vault", vault.path])
+
+    assert wiki_ingest.main() == 1
+
+    text = next((Path(vault.path) / "runs").glob("*.md")).read_text(encoding="utf-8")
+    assert "abandoned" in text
+    assert "wedged" in text
+
+
+def test_a_crashed_run_still_leaves_a_note(vault, monkeypatch):
+    monkeypatch.setattr(
+        wiki_ingest, "notify_failure", lambda job, detail, logger=None: None
+    )
+    monkeypatch.setattr(
+        wiki_ingest, "ingest_vault",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr("sys.argv", ["wiki_ingest.py", "--vault", vault.path])
+
+    assert wiki_ingest.main() == 1
+
+    text = next((Path(vault.path) / "runs").glob("*.md")).read_text(encoding="utf-8")
+    assert "failed" in text and "boom" in text
+
+
+def test_plan_only_leaves_no_run_note(vault, monkeypatch):
+    """--plan-only writes nothing, and that has to include this."""
+    monkeypatch.setattr(wiki_ingest, "run_agent", _stages(pages=[
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+    ]))
+    vault.raw("one.md", subdir="daily-notes")
+    monkeypatch.setattr(
+        "sys.argv", ["wiki_ingest.py", "--vault", vault.path, "--plan-only"]
+    )
+
+    assert wiki_ingest.main() == 0
+    assert not (Path(vault.path) / "runs").exists()
+
+
+def test_a_note_that_cannot_be_written_does_not_change_the_run(vault, monkeypatch):
+    """Bookkeeping must never turn a run that did real work into a crash, or
+    move its exit code."""
+    monkeypatch.setattr(wiki_ingest, "run_agent", _writes)
+    vault.raw("one.md", subdir="daily-notes")
+    monkeypatch.setattr(
+        wiki_ingest, "write_run_note",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("read-only vault")),
+    )
+    logger = _Logger()
+    monkeypatch.setattr(wiki_ingest, "setup_logger", lambda name: logger)
+    monkeypatch.setattr("sys.argv", ["wiki_ingest.py", "--vault", vault.path])
+
+    assert wiki_ingest.main() == 0
+    assert get_ingested_sources(vault.path) == ["one.md"]
+    assert any(
+        lvl == "warning" and "run note" in msg for lvl, msg in logger.records
+    )
+
+
+def test_a_budget_blown_mid_source_keeps_the_pages_that_landed(vault, monkeypatch):
+    """The run ends from wherever the process is, so _ingest_source is the only
+    place that knows which of this source's pages already reached disk. Without
+    it the note drops them and the pages have no account anywhere."""
+    from agent.run_summary import ABANDONED
+
+    pages = [
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+        {"name": "beta", "action": "create", "intent": "y", "section": "S"},
+    ]
+    stages = _stages(pages=pages)
+
+    def blow_up_after_alpha(**kwargs):
+        if "write_wiki_page" in kwargs["dispatch"]:
+            if _page_in_prompt(kwargs["user_prompt"]) == "beta":
+                raise budget.BudgetExceeded("run budget spent")
+        return stages(**kwargs)
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", blow_up_after_alpha)
+    vault.raw("one.md", subdir="daily-notes")
+    vault.raw("two.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    with pytest.raises(budget.BudgetExceeded):
+        wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    assert len(summary.sources) == 1
+    source = summary.sources[0]
+    assert source.status == ABANDONED
+    assert source.created == ["alpha"]
+    assert source.retried
+    # The page really is on disk, which is why losing it from the note matters.
+    assert (Path(vault.path) / "wiki" / "alpha.md").is_file()
+    # And the source never started is still counted as queued.
+    assert summary.unreached == 1
+
+
+def test_a_budget_blown_during_planning_still_names_the_source(vault, monkeypatch):
+    """Nothing landed, but knowing where the run stopped is the point."""
+    from agent.run_summary import ABANDONED
+
+    def blow_up(**kwargs):
+        raise budget.BudgetExceeded("run budget spent")
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", blow_up)
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    with pytest.raises(budget.BudgetExceeded):
+        wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    assert summary.sources[0].filename == "one.md"
+    assert summary.sources[0].status == ABANDONED
+    assert summary.sources[0].created == []
+
+
+def test_an_abandoned_run_note_lists_the_pages_that_landed(vault, monkeypatch):
+    """End to end through main(): the note on disk carries the work done."""
+    monkeypatch.setattr(
+        wiki_ingest, "notify_failure", lambda job, detail, logger=None: None
+    )
+    stages = _stages(pages=[
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+        {"name": "beta", "action": "create", "intent": "y", "section": "S"},
+    ])
+
+    def blow_up_after_alpha(**kwargs):
+        if "write_wiki_page" in kwargs["dispatch"]:
+            if _page_in_prompt(kwargs["user_prompt"]) == "beta":
+                raise budget.BudgetExceeded("run budget spent")
+        return stages(**kwargs)
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", blow_up_after_alpha)
+    vault.raw("one.md", subdir="daily-notes")
+    monkeypatch.setattr("sys.argv", ["wiki_ingest.py", "--vault", vault.path])
+
+    assert wiki_ingest.main() == 1
+
+    text = next((Path(vault.path) / "runs").glob("*.md")).read_text(encoding="utf-8")
+    assert "abandoned" in text
+    assert "- created: alpha" in text
+    assert "1 page(s) created" in text
+
+
+def test_a_page_written_the_instant_the_budget_blew_is_reported(vault, monkeypatch):
+    """The gap the ABANDONED handler alone did not close. The watchdog raises
+    from a SIGALRM handler, so it can land after the write tool put the page on
+    disk and before _execute_unit returned — the only moment `done` is
+    appended to. A real 3-minute run lost a page exactly this way."""
+    from agent.run_summary import ABANDONED
+
+    def blow_up_after_the_write(**kwargs):
+        dispatch = kwargs["dispatch"]
+        if "write_wiki_page" in dispatch:
+            dispatch["write_wiki_page"](
+                name="alpha", content="# alpha\n\n**Summary**: covered\n"
+            )
+            raise budget.BudgetExceeded("run budget spent")
+        return _stages()(**kwargs)
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", blow_up_after_the_write)
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    with pytest.raises(budget.BudgetExceeded):
+        wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    # The page is on disk, so the note has to say so.
+    assert (Path(vault.path) / "wiki" / "alpha.md").is_file()
+    assert summary.sources[0].status == ABANDONED
+    assert summary.sources[0].created == ["alpha"]
+
+
+def test_a_landed_page_that_later_failed_is_not_reported_twice(vault, monkeypatch):
+    """A write can land on one attempt and the retry can write nothing, which
+    leaves the page in `failed`. Reporting it as created as well would have the
+    note contradict itself."""
+    from agent.run_summary import ABANDONED
+
+    pages = [
+        {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
+        {"name": "beta", "action": "create", "intent": "y", "section": "S"},
+    ]
+    stages = _stages(pages=pages)
+    seen = []
+
+    def flaky(**kwargs):
+        dispatch = kwargs["dispatch"]
+        if "write_wiki_page" in dispatch:
+            name = _page_in_prompt(kwargs["user_prompt"])
+            if name == "beta":
+                raise budget.BudgetExceeded("run budget spent")
+            seen.append(name)
+            if len(seen) == 1:
+                # Landed, then the attempt died for an unrelated reason.
+                dispatch["write_wiki_page"](
+                    name=name, content=f"# {name}\n\n**Summary**: covered\n"
+                )
+                raise RuntimeError("server dropped the connection")
+            return "answered without writing"
+        return stages(**kwargs)
+
+    monkeypatch.setattr(wiki_ingest, "run_agent", flaky)
+    vault.raw("one.md", subdir="daily-notes")
+    summary = _summary(vault)
+
+    with pytest.raises(budget.BudgetExceeded):
+        wiki_ingest.ingest_vault(vault.path, _Logger(), summary=summary)
+
+    source = summary.sources[0]
+    assert source.status == ABANDONED
+    assert source.failed == ["alpha"]
+    assert source.created == []

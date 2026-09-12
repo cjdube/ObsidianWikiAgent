@@ -34,13 +34,24 @@ import os
 import re
 import sys
 import time
-from datetime import date
+from collections.abc import Sequence
+from datetime import date, datetime
 from pathlib import Path
 
 from agent import budget
 from agent.common import setup_logger, trim_launchd_log
 from agent.loop import complete_text, run_agent
 from agent.notify import notify_failure
+from agent.run_summary import (
+    ABANDONED,
+    LOG_FAILED,
+    NO_PLAN,
+    OK,
+    PARTIAL,
+    RunSummary,
+    SourceResult,
+    write_run_note,
+)
 from agent.wiki_tools import (
     CREATE_PAGE_TOOL_SCHEMAS,
     LOG_TOOL_SCHEMAS,
@@ -271,8 +282,22 @@ class _WriteCounter:
     """Counts the tool calls that actually change the wiki, so the caller can
     tell a real ingest from a run that read a source and silently did nothing."""
 
-    def __init__(self):
+    def __init__(self, on_write=None):
         self.count = 0
+        self._on_write = on_write
+
+    def landed(self) -> None:
+        """A write has reached disk. Say so now, not when the caller returns.
+
+        The budget watchdog raises from a SIGALRM handler, so the run can end
+        anywhere — including between a successful write and the line that would
+        have recorded it. A page written in that window is on disk with nothing
+        anywhere accounting for it, which is the one thing the run note exists
+        to prevent.
+        """
+        self.count += 1
+        if self._on_write is not None:
+            self._on_write()
 
     def __bool__(self) -> bool:
         return self.count > 0
@@ -423,7 +448,7 @@ def _execute_dispatch(
             # as an error result, and treating that as progress would mark a
             # page done on the strength of a call that wrote nothing.
             if "error" not in result:
-                writes.count += 1
+                writes.landed()
             return result
         return call
 
@@ -747,7 +772,13 @@ def _file_planned_page(vault_path: str, unit: dict, logger) -> None:
 
 
 def _execute_unit(
-    vault_path: str, filename: str, unit: dict, plan: _Plan, rules: str, logger
+    vault_path: str,
+    filename: str,
+    unit: dict,
+    plan: _Plan,
+    rules: str,
+    logger,
+    landed: dict[str, dict] | None = None,
 ) -> bool:
     """Stage 2: write one planned page, in its own conversation.
 
@@ -758,7 +789,14 @@ def _execute_unit(
     about 150 tokens, against the ~7,500 that reading those pages cost when they
     all shared one context.
     """
-    writes = _WriteCounter()
+    # `landed` is the caller's record of pages whose write reached disk, filled
+    # in by _WriteCounter at the moment it did. setdefault because a retry
+    # writes the same page again, and the page is one page either way.
+    writes = _WriteCounter(
+        on_write=None
+        if landed is None
+        else lambda: landed.setdefault(unit["name"], unit)
+    )
     siblings = [n for n in plan.names() if n != unit["name"]]
 
     # Disk, not the plan. _clean_plan_pages defaults an unclear action to
@@ -830,6 +868,14 @@ def _execute_unit(
     )
 
 
+def _split_actions(done: Sequence[dict]) -> tuple[list[str], list[str]]:
+    """Planned pages that landed, split into created and updated."""
+    return (
+        [u["name"] for u in done if u["action"] == "create"],
+        [u["name"] for u in done if u["action"] != "create"],
+    )
+
+
 def _write_log_entry(
     vault_path: str, filename: str, plan: _Plan, done: list[dict], rules: str, logger
 ) -> bool:
@@ -841,8 +887,7 @@ def _write_log_entry(
     rather than from the model's recollection of a long conversation.
     """
     writes = _WriteCounter()
-    created = [u["name"] for u in done if u["action"] == "create"]
-    updated = [u["name"] for u in done if u["action"] != "create"]
+    created, updated = _split_actions(done)
 
     def run(nudge: str) -> bool:
         writes.count = 0
@@ -867,7 +912,13 @@ def _write_log_entry(
     return _attempt(f"logging '{filename}'", logger, run, "append_log")
 
 
-def _ingest_source(vault_path: str, filename: str, rules: str, logger) -> bool:
+def _ingest_source(
+    vault_path: str,
+    filename: str,
+    rules: str,
+    logger,
+    summary: RunSummary | None = None,
+) -> bool:
     """Plan the source, write each planned page in its own conversation, then
     record what happened. Returns whether the source is fully ingested.
 
@@ -885,40 +936,92 @@ def _ingest_source(vault_path: str, filename: str, rules: str, logger) -> bool:
     # of any one page.
     budget.start_source(filename, MAX_RETRIES_PER_SOURCE)
 
-    plan = _plan_source(vault_path, filename, rules, logger)
-    if not plan:
-        logger.warning(
-            f"No usable plan for '{filename}' after {MAX_INGEST_ATTEMPTS} "
-            "attempts — nothing was written."
+    def record(status: str, done: Sequence[dict] = (),
+               failed: Sequence[str] = (), skipped: str = "") -> None:
+        """Hand the run summary what this source did. See agent/run_summary.py."""
+        if summary is None:
+            return
+        created, updated = _split_actions(done)
+        summary.add_source(
+            SourceResult(
+                filename=filename,
+                status=status,
+                created=created,
+                updated=updated,
+                failed=list(failed),
+                skipped=skipped,
+            )
         )
-        return False
 
-    logger.info(
-        f"Plan for '{filename}': {len(plan.pages)} page(s) — "
-        + ", ".join(f"{p['name']} ({p['action']})" for p in plan.pages)
-    )
+    # Bound before the try so the handler can report a source abandoned at any
+    # point, including during stage 1 when there is no plan yet. `landed` is
+    # filled in by the write tool itself; `done` is only appended to after
+    # _execute_unit returns, and the run can end between those two moments.
+    plan, done, failed = None, [], []
+    landed: dict[str, dict] = {}
+    try:
+        plan = _plan_source(vault_path, filename, rules, logger)
+        if not plan:
+            logger.warning(
+                f"No usable plan for '{filename}' after {MAX_INGEST_ATTEMPTS} "
+                "attempts — nothing was written."
+            )
+            record(NO_PLAN)
+            return False
 
-    done, failed = [], []
-    for unit in plan.pages:
-        budget.check(f"page '{unit['name']}' of '{filename}'")
-        if _execute_unit(vault_path, filename, unit, plan, rules, logger):
-            done.append(unit)
-        else:
-            failed.append(unit["name"])
-
-    if failed:
-        logger.warning(
-            f"'{filename}': {len(done)}/{len(plan.pages)} planned page(s) "
-            f"written; failed on {', '.join(failed)}. Leaving the source "
-            "unmarked so the next run redoes it."
+        logger.info(
+            f"Plan for '{filename}': {len(plan.pages)} page(s) — "
+            + ", ".join(f"{p['name']} ({p['action']})" for p in plan.pages)
         )
-        return False
 
-    # Only now, with every page on disk, is there something true to record.
-    return _write_log_entry(vault_path, filename, plan, done, rules, logger)
+        for unit in plan.pages:
+            budget.check(f"page '{unit['name']}' of '{filename}'")
+            if _execute_unit(
+                vault_path, filename, unit, plan, rules, logger, landed
+            ):
+                done.append(unit)
+            else:
+                failed.append(unit["name"])
+
+        if failed:
+            logger.warning(
+                f"'{filename}': {len(done)}/{len(plan.pages)} planned page(s) "
+                f"written; failed on {', '.join(failed)}. Leaving the source "
+                "unmarked so the next run redoes it."
+            )
+            record(PARTIAL, done, failed, plan.skipped)
+            return False
+
+        # Only now, with every page on disk, is there something true to record.
+        logged = _write_log_entry(vault_path, filename, plan, done, rules, logger)
+        # A source whose pages landed but whose log entry did not is still
+        # unmarked and still retried, so the note must not read like a clean
+        # success.
+        record(OK if logged else LOG_FAILED, done, failed, plan.skipped)
+        return logged
+    except budget.BudgetExceeded:
+        # Either limit ends the run from wherever the process happens to be —
+        # the watchdog raises from a SIGALRM handler — so this is the only place
+        # that knows which pages of this source already landed. Without it the
+        # run's note would drop them, and the pages on disk would have no
+        # account anywhere. The source stays unmarked and is redone either way.
+        #
+        # `done` alone is not enough. A page whose write landed in the same
+        # second the budget expired never reached the append above, so `landed`
+        # is added here — minus anything already reported, so a page does not
+        # appear as both written and failed.
+        seen = {u["name"] for u in done} | set(failed)
+        written = done + [u for n, u in landed.items() if n not in seen]
+        record(ABANDONED, written, failed, plan.skipped if plan else "")
+        raise
 
 
-def ingest_vault(vault_path: str, logger, plan_only: bool = False) -> int:
+def ingest_vault(
+    vault_path: str,
+    logger,
+    plan_only: bool = False,
+    summary: RunSummary | None = None,
+) -> int:
     rules = _load_rules(vault_path)
 
     # Organize freshly dropped files into their subdirectories first, so the
@@ -939,6 +1042,8 @@ def ingest_vault(vault_path: str, logger, plan_only: bool = False) -> int:
     scan = scan_raw(vault_path)
 
     binaries = list_binary_raw_files(vault_path, scan).get("files", [])
+    if summary is not None:
+        summary.binaries = binaries
     if binaries:
         logger.info(
             f"Skipping {len(binaries)} binary source(s) in raw/ — these need OCR "
@@ -951,6 +1056,10 @@ def ingest_vault(vault_path: str, logger, plan_only: bool = False) -> int:
     raw_files = raw_result.get("files", [])
     already_ingested = set(get_ingested_sources(vault_path))
     pending = [f for f in raw_files if f not in already_ingested]
+    # Set before the early return below, so a run that found nothing still says
+    # so in its note rather than leaving the count at zero by accident.
+    if summary is not None:
+        summary.pending = len(pending)
 
     if not pending:
         logger.info("Nothing to ingest — all raw sources already processed.")
@@ -966,7 +1075,7 @@ def ingest_vault(vault_path: str, logger, plan_only: bool = False) -> int:
         logger.info(f"Ingesting '{filename}'")
         try:
             budget.check(f"'{filename}'")
-            wrote = _ingest_source(vault_path, filename, rules, logger)
+            wrote = _ingest_source(vault_path, filename, rules, logger, summary)
         except budget.BudgetExceeded as e:
             # Either limit abandons the whole run, not just this source. A
             # spent retry ceiling means the *server* is unwell — transport
@@ -1016,6 +1125,25 @@ def _plan_only(vault_path: str, pending: list[str], rules: str, logger) -> int:
     return 0
 
 
+def _report_run(vault_path: str, summary: RunSummary, logger) -> None:
+    """Log what the run did, then leave the same thing as a note in the vault.
+
+    Called from a finally, so it also covers the abandoned and failed paths —
+    those are the runs most worth reading in the morning, and they are exactly
+    the ones that used to say nothing at all.
+
+    Wrapped because this is bookkeeping. A vault that is read-only, or full, or
+    gone, must not turn a run that did real work into a crash, and must not
+    change the exit code the caller is about to return.
+    """
+    try:
+        logger.info(summary.render_log_block())
+        path = write_run_note(vault_path, summary)
+        logger.info(f"Run note written to {path}")
+    except Exception as e:
+        logger.warning(f"Could not write the run note: {e}")
+
+
 def _budget_minutes() -> float:
     raw = os.getenv("WIKI_RUN_BUDGET_MINUTES")
     if not raw:
@@ -1057,18 +1185,35 @@ def main() -> int:
 
     job = f"wiki_ingest[{vault_name}]"
     started = time.monotonic()
+    # Wall clock, not the monotonic above: this one names the note and heads its
+    # block, so it has to be the time a human would read off a clock.
+    summary = RunSummary(
+        vault=args.vault, started_at=datetime.now(), budget_minutes=minutes
+    )
     try:
-        rc = ingest_vault(args.vault, logger, plan_only=args.plan_only)
+        rc = ingest_vault(
+            args.vault, logger, plan_only=args.plan_only, summary=summary
+        )
+        summary.outcome = "complete"
         logger.info("Wiki ingest run complete")
     except budget.BudgetExceeded as e:
         mins = (time.monotonic() - started) / 60
+        summary.outcome = "abandoned"
+        summary.detail = str(e)
         logger.error(f"Wiki ingest run abandoned after {mins:.1f} min: {e}")
         notify_failure(job, f"abandoned after {mins:.1f} min — {e}", logger)
         return 1
     except Exception as e:
+        summary.outcome = "failed"
+        summary.detail = str(e)
         logger.exception(f"Wiki ingest run failed: {e}")
         notify_failure(job, e, logger)
         return 1
+    finally:
+        summary.elapsed_minutes = (time.monotonic() - started) / 60
+        # --plan-only writes nothing by definition, and that includes this.
+        if not args.plan_only:
+            _report_run(args.vault, summary, logger)
 
     if rc:
         notify_failure(job, "one or more sources produced no wiki writes", logger)
