@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository-specific guidance for coding agents. Generic personal preferences belong in user-level configuration, not here.
+Repository-specific guidance for coding agents. The working method below belongs here too: Codex reads this file and does not read user-level configuration. Keep preferences that have nothing to do with this repository out of it.
 
 ## Project boundaries
 
@@ -11,11 +11,11 @@ Repository-specific guidance for coding agents. Generic personal preferences bel
 
 ## Working method
 
-- Evidence: Treat logs and dated notes as leads. Confirm a problem against the current file, current vault state, and intervening commits before reporting or fixing it.
+- Evidence: Treat logs and dated notes as leads. A report must describe the code as it is now, not as a log described it. Give the date of any evidence you cite.
 - Environment: Run project commands through `.venv/bin/python`; run the suite with `.venv/bin/pytest`. The system Python may be too old.
-- Measurement: Change one performance variable at a time, land it, then compare a named before/after metric before proposing the next optimization.
-- Instructions: Put prerequisites and commands in the order they must execute. During a long investigation, surface a short checkpoint before more slow or machine-intensive work.
-- Git: When the user explicitly asks for a commit or push, work directly on `main` and do not create a branch or pull request unless requested. Keep one idea per commit and explain the reason in the commit body.
+- Measurement: Every performance claim needs a named before/after number, and that number must point to one change.
+- Instructions: Write steps that run top to bottom with no reordering. Do not go silent during long work; say what you have found so far. A checkpoint may carry leads you have not confirmed yet, as long as it says they are unconfirmed.
+- Git: When the user explicitly asks for a commit or push, work directly on `main` and do not create a branch or pull request unless requested. Make each commit revertible on its own, and say why in the body.
 
 ## Architectural invariants
 
@@ -30,11 +30,11 @@ Repository-specific guidance for coding agents. Generic personal preferences bel
 ## Verification
 
 - Run `.venv/bin/pytest` after code changes.
-- After ingest, write-path, prompt, or tool-schema changes, run the real ingest against a fresh disposable vault copy built from `git archive`, never against the live vault. Compare wall clock, truncation/retry counts, new lint findings, and per-page insertions/deletions with the baseline.
+- Run the real ingest against a fresh disposable vault copy built from `git archive`, never against the live vault, whenever a change can alter what gets written to a page. Compare wall clock, truncation/retry counts, new lint findings, and per-page insertions/deletions with the baseline.
 - For documentation-only changes, validate links and run `git diff --check`; the Python suite is not required.
-- Before declaring completion, inspect the final diff and account for every changed line.
+- Every changed line must trace to the request. Inspect the final diff for lines that do not before declaring completion.
 
 ## Context to load on demand
 
-- Ingest performance, page writes, link scope, escaped-content handling, read-path scaling, cross-source synthesis, live-vault operations, or LocalLLMAgent integration: read [`docs/agent-context.md`](docs/agent-context.md) before planning or changing behavior. It records dated decisions, measurements, resolved incidents, and watch items; reverify historical claims against current state.
+- Ingest performance, page writes, link scope, escaped-content handling, read-path scaling, cross-source synthesis, live-vault operations, and LocalLLMAgent integration are already decided and measured in [`docs/agent-context.md`](docs/agent-context.md). Read it before planning in those areas, so you do not re-open a settled question. It records dated decisions, measurements, resolved incidents, and watch items; reverify historical claims against current state.
 
