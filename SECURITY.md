@@ -66,9 +66,15 @@ in `agent/wiki_tools.py`. No stage sees all eight; each is offered only what its
 one job needs. Each ingest stage's dispatch resolves a ninth, `read_index`,
 which is deliberately callable-but-unadvertised so a vault's `RULES.md` naming
 it in prose still works. It is a read, and it is inside the same guards. The
-read-only side — `wiki_query.py` and the lint judgment pass, both on
-`query_dispatch` — does not resolve it at all: the index grows with the vault,
-so those two find pages with `search_wiki_pages` instead.)
+read-only side does not resolve it at all: the index grows with the vault, so
+it finds pages with `search_wiki_pages` instead. `wiki_query.py` runs on
+`query_dispatch` and holds nothing beyond it. The deep lint's judgment pass
+runs on `lint_dispatch`, which is `query_dispatch` plus a tenth tool,
+`list_wiki_pages` — a bare page-name list with no summaries. That is the single
+measured exception to the rule that a model-visible result must be bounded by
+the answer rather than by vault size, and `AGENTS.md` records the 2026-09-11
+measurement behind it, scopes it to that one pass and that one tool, and says
+to re-measure before widening it.)
 
 The sharpest of those limits is the split between the two stage-2 sets. Which
 one a unit is offered is decided by whether its page is already on disk, not by

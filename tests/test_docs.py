@@ -175,6 +175,31 @@ def test_read_index_is_dispatchable_but_never_advertised():
     }
 
 
+def test_security_md_describes_the_lint_judgment_pass_tool_set():
+    """SECURITY.md said the judgment pass ran on query_dispatch for six days
+    after it stopped doing so, because no test looked at LINT_TOOL_SCHEMAS —
+    the four ingest lists and QUERY_TOOL_SCHEMAS are all the suite checked.
+    The widening was deliberate and measured; only the prose went stale. This
+    fails the next widening instead of letting it go unwritten."""
+    import wiki_lint
+    from agent import wiki_tools
+
+    extra = [
+        schema["function"]["name"]
+        for schema in wiki_lint.LINT_TOOL_SCHEMAS
+        if schema not in wiki_tools.QUERY_TOOL_SCHEMAS
+    ]
+    assert extra == ["list_wiki_pages"], (
+        f"the judgment pass now advertises {extra} beyond the read path; "
+        "re-measure it against the window and re-word SECURITY.md"
+    )
+
+    text = " ".join((ROOT / "SECURITY.md").read_text(encoding="utf-8").split())
+    assert "`lint_dispatch`" in text
+    assert "`list_wiki_pages`" in text
+    assert "both on `query_dispatch`" not in text
+
+
 def test_readme_agrees_with_the_lint_template_existing():
     """README used to send a reader to copy launchd/template.plist.txt for the
     audit job, in a repo that has a template-lint.plist.txt and an install.sh
