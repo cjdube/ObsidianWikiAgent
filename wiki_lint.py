@@ -942,57 +942,73 @@ def scope_sweep(pages: dict[str, str], rules: str,
     report and reads better first. It is not insurance against the budget: a
     wedge dies at SWEEP_PAGE_CEILING_SECONDS, and a sweep that legitimately
     outruns DEEP_RUN_BUDGET_MINUTES has been sized wrong, not unlucky.
+
+    A sweep that does die still hands back what it found. BudgetExceeded is
+    re-raised with the partial result attached as `.partial`, because the cost
+    of losing it is the whole pass: this is the one pass whose wall clock grows
+    with the vault, so hitting the ceiling is the expected end for a vault that
+    has outgrown its budget, not a rare crash. The findings used to be local to
+    this function and simply vanished — only the per-page verdict lines in the
+    log survived, and those carry the verdict without the finding text.
     """
     system_prompt = rules + SCOPE_SWEEP_WRAPPER
     findings: list[str] = []
     unreadable: list[str] = []
     counts = {SWEEP_CLEAN: 0, SWEEP_FINDING: 0, SWEEP_UNPARSED: 0}
 
-    for i, (slug, content) in enumerate(pages.items(), 1):
-        budget.check(f"scope sweep at {slug}")
-        # Each page is its own unit of work for the retry ceiling. Counting
-        # retries across the whole sweep would let a wedged server stay under
-        # every per-call cap while the total ran to hundreds, which is the
-        # failure agent/budget.py was written for.
-        budget.start_source(f"scope sweep: {slug}", MAX_SWEEP_RETRIES)
-        started = time.monotonic()
-        reply = complete_text(
-            system_prompt=system_prompt,
-            user_prompt=f"Page: {slug}\n\n{content}",
-            logger=logger,
-            # See agent/loop._run_ollama. Measured 2026-09-11, reasoning cost
-            # 46s a page against 0.4s with it off. The stage-1 warning there
-            # does not transfer: that failure was a model not calling a tool,
-            # and this call offers none.
-            think=False,
-        ).strip()
-        spent = time.monotonic() - started
-        if spent > SWEEP_PAGE_CEILING_SECONDS:
-            raise budget.BudgetExceeded(
-                f"scope sweep spent {spent:.0f}s on '{slug}', past the "
-                f"{SWEEP_PAGE_CEILING_SECONDS}s page ceiling"
-            )
+    try:
+        for i, (slug, content) in enumerate(pages.items(), 1):
+            budget.check(f"scope sweep at {slug}")
+            # Each page is its own unit of work for the retry ceiling. Counting
+            # retries across the whole sweep would let a wedged server stay
+            # under every per-call cap while the total ran to hundreds, which is
+            # the failure agent/budget.py was written for.
+            budget.start_source(f"scope sweep: {slug}", MAX_SWEEP_RETRIES)
+            started = time.monotonic()
+            reply = complete_text(
+                system_prompt=system_prompt,
+                user_prompt=f"Page: {slug}\n\n{content}",
+                logger=logger,
+                # See agent/loop._run_ollama. Measured 2026-09-11, reasoning
+                # cost 46s a page against 0.4s with it off. The stage-1 warning
+                # there does not transfer: that failure was a model not calling
+                # a tool, and this call offers none.
+                think=False,
+            ).strip()
+            spent = time.monotonic() - started
+            if spent > SWEEP_PAGE_CEILING_SECONDS:
+                raise budget.BudgetExceeded(
+                    f"scope sweep spent {spent:.0f}s on '{slug}', past the "
+                    f"{SWEEP_PAGE_CEILING_SECONDS}s page ceiling"
+                )
 
-        verdict = verdict_of(reply)
-        counts[verdict] += 1
-        # One line per page, because this pass can run for hours and the log is
-        # the only thing anyone can look at while it does. Without it a working
-        # sweep and a wedged one look identical from outside: silence. INFO,
-        # like every other lint line — LocalLLMAgent's log_inspector reports
-        # WARNINGs, and normal progress is not an alert.
-        if logger:
-            logger.info(
-                f"Scope sweep {i}/{len(pages)} {verdict} {slug} ({spent:.1f}s)"
-            )
-        if verdict == SWEEP_FINDING:
-            findings.append(f"{slug} — {_sweep_body(reply)}")
-        elif verdict == SWEEP_UNPARSED:
-            unreadable.append(slug)
+            verdict = verdict_of(reply)
+            counts[verdict] += 1
+            # One line per page, because this pass can run for hours and the log
+            # is the only thing anyone can look at while it does. Without it a
+            # working sweep and a wedged one look identical from outside:
+            # silence. INFO, like every other lint line — LocalLLMAgent's
+            # log_inspector reports WARNINGs, and normal progress is not an
+            # alert.
+            if logger:
+                logger.info(
+                    f"Scope sweep {i}/{len(pages)} {verdict} {slug} ({spent:.1f}s)"
+                )
+            if verdict == SWEEP_FINDING:
+                findings.append(f"{slug} — {_sweep_body(reply)}")
+            elif verdict == SWEEP_UNPARSED:
+                unreadable.append(slug)
+    except budget.BudgetExceeded as e:
+        # The run still ends the way it always did — this re-raises. The only
+        # change is that the hours of work already done leave with it, so the
+        # caller can print them before the exception unwinds.
+        e.partial = (findings, unreadable, counts)
+        raise
 
     return findings, unreadable, counts
 
 
-def _sweep_line(counts: dict[str, int]) -> str:
+def _sweep_line(counts: dict[str, int], total: int | None = None) -> str:
     """One sentence saying what the sweep covered and what it did not.
 
     Separate from scope_sweep so the wording is testable without a model run,
@@ -1001,7 +1017,16 @@ def _sweep_line(counts: dict[str, int]) -> str:
     report that said only "swept 569 of 569" would be read as all four.
     """
     swept = sum(counts.values())
-    line = f"Scope sweep read {swept} of {swept} pages. Out-of-scope check only."
+    # total is the vault; swept is what this run reached. They differ only when
+    # the sweep was cut short, and a report that still said "n of n" would read
+    # as full coverage of the one category this pass does cover.
+    total = swept if total is None else total
+    line = f"Scope sweep read {swept} of {total} pages. Out-of-scope check only."
+    if swept < total:
+        line += (
+            f" The sweep stopped early: {total - swept} page(s) were NOT swept, "
+            f"so this list is partial."
+        )
     if counts[SWEEP_UNPARSED]:
         line += (
             f" {counts[SWEEP_UNPARSED]} gave no readable verdict and were NOT "
@@ -1095,7 +1120,18 @@ def _lint(args, rules_path: Path, logger) -> int:
         rules = rules_path.read_text(encoding="utf-8")
 
         print("\n---\n\n## Scope sweep\n")
-        sweep_findings, unreadable, counts = scope_sweep(pages, rules, logger)
+        # A sweep that runs out of budget still reports. It is the longest pass
+        # here and the only one whose cost grows with the vault, so a vault that
+        # outgrows DEEP_RUN_BUDGET_MINUTES loses this pass every week — and the
+        # lint is weekly, so each loss is two weeks with no scope check. Print
+        # first, then let the exception end the run exactly as before.
+        stopped = None
+        try:
+            sweep_findings, unreadable, counts = scope_sweep(pages, rules, logger)
+        except budget.BudgetExceeded as e:
+            stopped = e
+            sweep_findings, unreadable, counts = e.partial
+
         for i, finding in enumerate(sweep_findings, 1):
             print(f"{i}. {finding}\n")
         if not sweep_findings:
@@ -1104,12 +1140,14 @@ def _lint(args, rules_path: Path, logger) -> int:
             # Named, not just counted. These are the pages nobody judged, and a
             # number alone gives a reader no way to go and judge them.
             print(f"No readable verdict: {', '.join(unreadable)}\n")
-        print(_sweep_line(counts))
+        print(_sweep_line(counts, len(pages)))
         logger.info(
             f"Scope sweep: {sum(counts.values())} pages, "
             f"{counts[SWEEP_FINDING]} finding{'' if counts[SWEEP_FINDING] == 1 else 's'}, "
             f"{counts[SWEEP_UNPARSED]} unreadable"
         )
+        if stopped is not None:
+            raise stopped
 
         print("\n---\n\n## Judgment pass\n")
         context = report if count else "The structural pass found no problems."

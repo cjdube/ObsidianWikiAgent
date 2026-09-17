@@ -1094,6 +1094,48 @@ def test_the_sweep_line_says_it_covers_one_category(vault):
     assert "NOT judged" not in line
 
 
+def test_the_sweep_line_says_when_it_did_not_finish():
+    """A cut-short sweep used to still print "n of n", which reads as full
+    coverage of the one category this pass covers."""
+    line = wl._sweep_line(
+        {wl.SWEEP_CLEAN: 3, wl.SWEEP_FINDING: 1, wl.SWEEP_UNPARSED: 0}, 609
+    )
+    assert "4 of 609 pages" in line
+    assert "605 page(s) were NOT swept" in line
+    assert "partial" in line
+
+
+def test_a_sweep_that_runs_out_of_budget_keeps_what_it_found(vault, monkeypatch):
+    """This is the pass whose wall clock grows with the vault, so hitting the
+    budget is the expected end for a vault that has outgrown it — not a rare
+    crash. The findings were local to scope_sweep and went with the exception;
+    only the per-page verdict lines survived, and those carry the verdict
+    without the finding text."""
+    from agent import budget
+
+    replies = iter([
+        "a is a recipe; delete it.\nVERDICT: FINDING",
+        "b has no verdict at all",
+    ])
+
+    def _reply(**kw):
+        try:
+            return next(replies)
+        except StopIteration:
+            raise budget.BudgetExceeded("run budget exhausted at page 3")
+
+    monkeypatch.setattr(wl, "complete_text", _reply)
+
+    with pytest.raises(budget.BudgetExceeded) as e:
+        wl.scope_sweep({"a": "x", "b": "y", "c": "z"}, "rules")
+
+    findings, unreadable, counts = e.value.partial
+    assert findings == ["a — a is a recipe; delete it."]
+    assert unreadable == ["b"]
+    assert counts[wl.SWEEP_FINDING] == 1
+    assert counts[wl.SWEEP_UNPARSED] == 1
+
+
 def test_the_sweep_line_admits_pages_it_could_not_judge(vault):
     line = wl._sweep_line({wl.SWEEP_CLEAN: 7, wl.SWEEP_FINDING: 0,
                            wl.SWEEP_UNPARSED: 2})
