@@ -59,7 +59,12 @@ class RunSummary:
     vault: str
     started_at: datetime
     budget_minutes: float
-    pending: int = 0
+    # None until the run has counted the queue. wiki_ingest sorts raw/, loads
+    # rules and lists files before it can set this, and any of those can raise;
+    # a run that dies in that window has not found zero pending sources, it has
+    # not looked. The two readings send a reader to different repositories, so
+    # the note must not collapse them — see render_markdown.
+    pending: int | None = None
     binaries: list[str] = field(default_factory=list)
     sources: list[SourceResult] = field(default_factory=list)
     outcome: str = "running"  # "complete" | "abandoned" | "failed"
@@ -96,12 +101,17 @@ class RunSummary:
     def unreached(self) -> int:
         """Pending sources the run never started. Only meaningful once the run
         has stopped early — a completed run reaches everything."""
+        if self.pending is None:
+            return 0
         return max(0, self.pending - len(self.sources))
 
     def _headline(self) -> str:
+        # "0 of ?" rather than "0 of 0": the run never reached the count, and a
+        # zero here would read as a total the run had actually established.
+        total = "?" if self.pending is None else self.pending
         return (
             f"{self.outcome} in {self.elapsed_minutes:.1f} min — "
-            f"{self.ingested} of {self.pending} source(s) ingested, "
+            f"{self.ingested} of {total} source(s) ingested, "
             f"{len(self.created)} page(s) created, "
             f"{len(self.updated)} page(s) updated, "
             f"{len(self.failed)} page(s) failed"
@@ -129,7 +139,17 @@ class RunSummary:
                 "",
             ]
 
-        if not self.pending:
+        if self.pending is None:
+            # The run died before it counted the queue — during the raw/ sort,
+            # the rules load, or the file listing. Saying "nothing was pending"
+            # here would send the reader to the upstream job that fills raw/,
+            # when the fault is in this run and its reason is the line above.
+            lines += [
+                "The run stopped before it counted the pending sources, so the "
+                "queue is unknown. The reason above is where to look.",
+                "",
+            ]
+        elif not self.pending:
             # Worth saying rather than leaving the note empty. On a vault whose
             # raw/ is filled by a scheduled job, nothing pending means that job
             # did not run — a silent note would hide it.

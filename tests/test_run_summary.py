@@ -95,6 +95,22 @@ def test_an_empty_run_says_so_rather_than_rendering_nothing():
     assert "Nothing was pending" in note
 
 
+def test_a_run_that_died_before_counting_does_not_claim_nothing_was_pending():
+    """pending is only set once raw/ has been sorted and listed. A run that
+    died in that window never looked at the queue, and saying it was empty
+    sends the reader to the upstream repo that fills raw/ — away from the
+    reason, which is on the line above."""
+    for outcome in ("abandoned", "failed"):
+        note = _summary(
+            pending=None,
+            outcome=outcome,
+            detail="run budget exhausted before sorting Daily-2026-09-17.md",
+        ).render_markdown()
+        assert "Nothing was pending" not in note
+        assert "stopped before it counted the pending sources" in note
+        assert "0 of ? source(s) ingested" in note
+
+
 def test_an_abandoned_run_carries_its_reason():
     s = _summary(outcome="abandoned", detail="run budget of 45 min spent")
     assert "## 05:00 — abandoned in 8.6 min" in s.render_markdown()
