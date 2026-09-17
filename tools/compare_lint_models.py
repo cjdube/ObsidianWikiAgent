@@ -453,8 +453,9 @@ def main(argv=None):
     ap.add_argument("--seed-dir", default=str(SEED_DIR),
                     help=f"the seed pack to use (default {SEED_DIR})")
     ap.add_argument("--timeout", type=int, default=2400,
-                    help="seconds to allow one run (default 2400; "
-                         "wiki_lint's own budget is 30 minutes)")
+                    help="seconds to allow one run (default 2400 = 40 min; "
+                         "wiki_lint's own budget is 240 minutes, so this is "
+                         "the tighter cap and the one that will stop a run)")
     ap.add_argument("--check", action="store_true",
                     help="build the vault, assert the structural pass is "
                          "clean, and stop. No model is called.")

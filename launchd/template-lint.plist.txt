@@ -107,7 +107,7 @@
              gemma4:31b-mlx    4.7 of 12   1 false finding    222s
 
          qwen3.8:27b-mlx is dense and roughly twice the auditor for about four
-         times the wall clock, which still lands well inside the 30-minute
+         times the wall clock, which still lands well inside the 240-minute
          budget. The dense Gemma is not worth it: same recall, twice the time.
          All three stayed 100% GPU at OLLAMA_NUM_CTX=65536 on a 48 GB machine.
 
