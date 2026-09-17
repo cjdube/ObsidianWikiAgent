@@ -597,9 +597,14 @@ def _ollama_options() -> dict:
     accumulates — measured at ~22K tokens on a 228-page vault and growing with
     it. Overflow doesn't error: Ollama drops the oldest messages, so the model
     answers from a truncated view and the output just quietly gets worse.
-    32768 matches the default of the Ollama this was built against (0.32.3);
-    naming it here means an upstream change to that default cannot start
-    truncating runs without anyone noticing.
+    The default was 32768, which matched the Ollama this was built against
+    (0.32.3). It is now 131072, because 32768 is measurably too small: the deep
+    lint's list-tool trials on a 609-page vault peaked at 113% of a 65536
+    window and lost RULES.md without erroring, and 131072 put the same run at
+    42%. `config/.env` is not tracked, so leaving the code default at the old
+    number meant every fresh checkout ran that path overflowed. Naming the
+    number here still means an upstream change to Ollama's own default cannot
+    start truncating runs without anyone noticing.
 
     `num_predict` caps how much one reply may be. Ollama's default for
     /api/chat is unlimited, so a repetition loop generates until the context
@@ -612,7 +617,7 @@ def _ollama_options() -> dict:
     logged (see _warn_if_reply_hit_the_cap) rather than silent.
     """
     return {
-        "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "32768")),
+        "num_ctx": int(os.getenv("OLLAMA_NUM_CTX", "131072")),
         "num_predict": int(os.getenv("OLLAMA_NUM_PREDICT", "2000")),
     }
 
@@ -650,9 +655,11 @@ _CHARS_PER_TOKEN = 4
 
 # Fraction of num_ctx at which a measured prompt is worth a warning. The prompt
 # still has to hold the reply (num_predict) and at least one more tool result,
-# and on this vault a single page read is ~4,500 tokens — so at 70% of a 32768
-# window the ~9,800 tokens left is one big read away from overflow. The run
-# that prompted all this sat at 73% with nothing in any log to say so.
+# and on this vault a single page read is ~4,500 tokens — so at 70% of the
+# 32768 window this was tuned against, the ~9,800 tokens left is one big read
+# away from overflow. The run that prompted all this sat at 73% with nothing in
+# any log to say so. The fraction still holds at 131072: the headroom it leaves
+# scales with the window, and the reads it has to survive got no smaller.
 _CONTEXT_WARN_FRACTION = 0.70
 
 

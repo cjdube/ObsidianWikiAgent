@@ -253,8 +253,11 @@ Raising `config/.env` to 131072 put the same run at 42%, 27% and 35% peak fill
 with no overflow warning. `qwen3.8:27b-mlx` loads at 131072 and stays **100%
 GPU** on the 48 GB box at 18 GB resident, checked with `ollama ps`, even with
 `gemma4:26b-mlx` resident alongside it. `config/.env` is not tracked, so a
-checkout that keeps the 32768 code default will overflow on this path; that is
-why the number is written here and in the `wiki_lint.py` comment.
+checkout that kept the 32768 code default would overflow on this path; that is
+why the number is written here and in the `wiki_lint.py` comment. Writing it
+down was not enough on its own — a fresh checkout still ran overflowed — so on
+2026-09-17 both the code default in `agent/loop.py` and `config/.env.example`
+were raised to 131072 to match.
 
 **Precision was hand-counted on 2026-09-11, across all nine trials.** Reports
 at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
