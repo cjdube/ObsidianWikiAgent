@@ -259,6 +259,40 @@ down was not enough on its own — a fresh checkout still ran overflowed — so 
 2026-09-17 both the code default in `agent/loop.py` and `config/.env.example`
 were raised to 131072 to match.
 
+**The scope sweep cannot overflow; only the judgment pass can.** Measured
+2026-09-17 from `logs/usage.jsonl`, which carries `prompt_tokens` and `num_ctx`
+per call — the 2026-09-13 deep run, 625 pages, `qwen3.8:27b-mlx` at 131072:
+
+| Pass | Calls | Largest prompt | At 32768 | At 131072 |
+| --- | --- | --- | --- | --- |
+| Scope sweep (`complete_text`) | 625 | 13,366 tok | 40.8%, no overflow | 10.2% |
+| Judgment pass (`run_agent`) | 10 | 46,310 tok | 141%, 4 calls over | 35.3% |
+
+The sweep's prompt is `RULES.md` plus one page and is rebuilt each call, so it
+never accumulates: mean fill 3.2%. Volume is not the risk; accumulation is. Two
+consequences, both easy to get backwards because the sweep is the pass that
+makes 625 calls:
+
+- Do **not** add `_log_prompt_size` to the Ollama `complete_text` path. It logs
+  at INFO on every call and warns only at ≥70%, so on the sweep it would add 625
+  INFO lines and zero warnings per run. There is no growth for it to catch, and
+  the loop that does grow already calls it.
+- The 113% figure above, and any future overflow on this path, belongs to the
+  judgment pass. A 2026-09-17 review draft attributed it to the sweep; that was
+  wrong, and it also implied the overflow would be silent, when `run_agent`
+  would have logged it.
+
+**The deep run uses about half its budget.** Same run, from the sweep's own
+per-page log lines: structural pass 0.9 min, scope sweep 101.2 min, judgment
+pass 15.1 min — **117.2 min against `DEEP_RUN_BUDGET_MINUTES` of 240, or
+48.8%**. Per page: mean 9.80s, median 7.9s, max 84.2s, and no page came near the
+120s `SWEEP_PAGE_CEILING_SECONDS`. Holding the other two passes fixed, the sweep
+fills 240 minutes at about **1371 pages**; page counts grew 520 → 625 between
+2026-08-31 and 2026-09-13, so at 8–9 pages a day that is 81–92 days out —
+roughly mid-December 2026. Re-check then, or sooner after a large merge. This is
+one run, so treat 9.80s a page as a single observation: the model sets it, and
+the model lives in the plist.
+
 **Precision was hand-counted on 2026-09-11, across all nine trials.** Reports
 at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
 `/tmp/lint-ctx131k/reports` until the box is rebooted. Eighty-five asserted
