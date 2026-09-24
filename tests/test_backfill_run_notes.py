@@ -139,6 +139,34 @@ def test_an_abandoned_run_takes_its_pending_total_from_the_stop_line():
     assert "run budget of 45 min expired" in summary.detail
 
 
+def test_a_run_that_died_before_counting_leaves_the_queue_unknown():
+    """A run that dies while sorting raw/ or loading rules logs no 'Ingesting'
+    line and no stop line. Zero ingesting lines is not zero pending, and a note
+    that said 'Nothing was pending' would blame the upstream job."""
+    run = _one(_lines(
+        "2026-09-11 09:45:00,100 [ERROR] Wiki ingest run abandoned after 45.0 min: "
+        "run budget exhausted before sorting Daily.md\n",
+    ))
+
+    summary = b.to_summary(run, "/v", "x.log")
+    assert summary.pending is None
+    assert "Nothing was pending" not in summary.render_markdown()
+
+
+def test_a_failed_run_does_not_count_its_queue_from_the_sources_it_reached():
+    """'Run stopped after n/m' is logged only for a budget stop. A run that
+    failed on any other error has no total, and the 'Ingesting' lines count
+    only what it reached before it died."""
+    run = _one(_lines(
+        _ingesting("a.md"),
+        _ingesting("b.md"),
+        "2026-09-11 09:05:00,000 [ERROR] Wiki ingest run failed: disk full\n",
+    ))
+
+    summary = b.to_summary(run, "/v", "x.log")
+    assert summary.pending is None
+
+
 def test_the_source_in_flight_when_the_budget_blew_keeps_its_pages():
     """Same reason the live accumulator has an ABANDONED status: the pages it
     already wrote are on disk and must not vanish from the note."""

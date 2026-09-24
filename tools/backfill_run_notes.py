@@ -211,14 +211,19 @@ def parse(lines) -> list[_Run]:
 
 
 def to_summary(run: _Run, vault_path: str, log_name: str) -> RunSummary:
+    # A completed run reached every pending source, so the count of
+    # "Ingesting" lines is the whole queue. A budget stop's "Run stopped after
+    # n/m" line is the only place m appears. Any other run that ended early
+    # left no total, so the queue stays unknown (None), not zero — see
+    # RunSummary.pending.
+    pending = run.pending
+    if pending is None and run.outcome == "complete":
+        pending = len(run.order)
     summary = RunSummary(
         vault=vault_path,
         started_at=run.started_at,
         budget_minutes=run.budget_minutes,
-        # A completed run reached every pending source, so the count of
-        # "Ingesting" lines is the whole queue. An abandoned one did not, and
-        # its "Run stopped after n/m" line is the only place m appears.
-        pending=run.pending if run.pending is not None else len(run.order),
+        pending=pending,
         binaries=run.binaries,
         outcome=run.outcome,
         detail=run.detail,
