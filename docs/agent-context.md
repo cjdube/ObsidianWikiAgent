@@ -293,6 +293,29 @@ roughly mid-December 2026. Re-check then, or sooner after a large merge. This is
 one run, so treat 9.80s a page as a single observation: the model sets it, and
 the model lives in the plist.
 
+**Re-check in late November, not mid-December: the judgment pass varies.**
+Two more runs, read 2026-10-01 from `logs/learnings-lint.launchd.log`:
+
+| Run | Pages | Sweep (s/page) | Judgment: iterations, pages read, last fill | Judgment | Whole run |
+| --- | --- | --- | --- | --- | --- |
+| 2026-09-13 | 625 | 101.2 min (9.80) | 10, 46, 35% | 15.1 min | 117.2 min |
+| 2026-09-20 | 679 | 109.6 min (9.69) | 31, 103, 88% | 40.2 min | 150.0 min |
+| 2026-09-27 | 731 | 120.0 min (9.85) | 7, 28, 23% | 8.8 min | 128.8 min |
+
+The sweep held at 9.7–9.9s a page, so that number now stands on three runs.
+The judgment pass did not: the model decides when it is done, and on
+2026-09-20 it kept going through twelve duplicate-page pairs. Nothing wedged or
+retried. Each iteration added about 3,700 tokens, so the later ones were slower,
+and two took 4–5 minutes. `MAX_DEEP_ITERATIONS` is 120 and does not bind; the
+window does. That run logged the ≥70% warning from iteration 22 and stopped at
+88%, so the pass cannot go much past about 35 iterations, or about 45 minutes.
+Plan on 45, not 15. Then the run fills 240 minutes at about **1190 pages**
+(`(240 − 0.9 − 45) min / 9.8s`). Pages grew 625 → 731 in 14 days, 7.6 a day,
+so that is about 60 days after 2026-09-27: **around 2026-11-26**. Re-check
+then. The slowest sweep page, `wren`, went 84.2 → 88.6 → 92.8s against the 120s
+ceiling, with no page-ceiling stop in any of the three runs; look at that
+page's size if it passes about 110s.
+
 **Precision was hand-counted on 2026-09-11, across all nine trials.** Reports
 at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
 `/tmp/lint-ctx131k/reports` until the box is rebooted. Eighty-five asserted
