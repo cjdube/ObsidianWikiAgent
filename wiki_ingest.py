@@ -726,7 +726,7 @@ def _plan_source(vault_path: str, filename: str, rules: str, logger) -> _Plan:
             system_prompt=rules + UNATTENDED_WRAPPER + PLAN_WRAPPER,
             user_prompt=(
                 f"Plan the ingest of the source file '{filename}' from raw/. "
-                "Read it, list the existing wiki pages and the index sections, "
+                "Read it, search the existing wiki pages and list the index sections, "
                 "then call submit_plan once with every page this source should "
                 "create or update." + nudge
             ),

@@ -1613,7 +1613,7 @@ SUBMIT_PLAN_SCHEMA = {
     "type": "function",
     "function": {
         "name": "submit_plan",
-        "description": "Submit the list of wiki pages this source should touch. Call this ONCE, at the end, after you have read the source and listed the existing pages. Do not write any page content here — a later step writes each page. Include a page for every idea worth recording, and also include any existing page that needs a link added back to a page you are creating.",
+        "description": "Submit the list of wiki pages this source should touch. Call this ONCE, at the end, after you have read the source and searched the existing pages. Do not write any page content here — a later step writes each page. Include a page for every idea worth recording, and also include any existing page that needs a link added back to a page you are creating.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1623,8 +1623,8 @@ SUBMIT_PLAN_SCHEMA = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "Page name, e.g. 'ollama' (with or without .md). For an update, use the exact name from list_wiki_pages."},
-                            "action": {"type": "string", "enum": ["create", "update"], "description": "'update' if list_wiki_pages already shows this page, otherwise 'create'."},
+                            "name": {"type": "string", "description": "Page name, e.g. 'ollama' (with or without .md). For an update, use the exact name search_wiki_pages returned."},
+                            "action": {"type": "string", "enum": ["create", "update"], "description": "'update' if search_wiki_pages found this page, otherwise 'create'."},
                             "intent": {"type": "string", "description": "One sentence: what this source adds to this page. For a link-back, say which page to link to, e.g. 'add a link to [[gemma-4]]'."},
                             "section": {"type": "string", "description": "Index section heading this page belongs under. Use one from list_index_sections where it fits."},
                         },
