@@ -29,6 +29,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import functools
 import os
 import re
@@ -38,7 +39,7 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
 
-from agent import budget
+from agent import budget, common
 from agent.common import setup_logger, trim_launchd_log
 from agent.loop import complete_text, run_agent
 from agent.notify import notify_failure
@@ -1176,6 +1177,21 @@ def main() -> int:
     logger = setup_logger(f"wiki_ingest.{vault_name}")
     trim_launchd_log(logger)
 
+    job = f"wiki_ingest[{vault_name}]"
+    # One writer per vault. Two runs would plan the same oldest source and both
+    # write it: two log.md entries, and edits a re-plan words differently are
+    # added twice. --plan-only writes nothing, so it needs no lock. The lock
+    # lives in logs/, not the vault, so the nightly snapshot never commits it.
+    # `lock` stays open until main() returns, and the lock with it.
+    if not args.plan_only:
+        lock = open(common.LOGS_DIR / f"wiki_ingest.{vault_name}.log.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.error(f"Another ingest is already running on {args.vault} — stopping.")
+            notify_failure(job, "another ingest is already running on this vault", logger)
+            return 1
+
     minutes = args.budget_minutes if args.budget_minutes is not None else _budget_minutes()
     budget.start_run(minutes * 60)
     logger.info(
@@ -1183,7 +1199,6 @@ def main() -> int:
         f"(budget {minutes:g} min)"
     )
 
-    job = f"wiki_ingest[{vault_name}]"
     started = time.monotonic()
     # Wall clock, not the monotonic above: this one names the note and heads its
     # block, so it has to be the time a human would read off a clock.

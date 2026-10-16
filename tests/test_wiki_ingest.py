@@ -1029,6 +1029,30 @@ def test_summary_is_optional(vault, monkeypatch):
 # --- the run note ----------------------------------------------------------
 
 
+def test_main_refuses_a_second_ingest_on_the_same_vault(vault, monkeypatch):
+    import fcntl
+    from pathlib import Path
+    from agent import common
+
+    pushed, ran = [], []
+    monkeypatch.setattr(
+        wiki_ingest, "notify_failure",
+        lambda job, detail, logger=None: pushed.append(detail),
+    )
+    monkeypatch.setattr(wiki_ingest, "ingest_vault", lambda *a, **k: ran.append(1) or 0)
+    monkeypatch.setattr("sys.argv", ["wiki_ingest.py", "--vault", vault.path])
+    common.LOGS_DIR.mkdir(exist_ok=True)
+    name = Path(vault.path).name
+    with open(common.LOGS_DIR / f"wiki_ingest.{name}.log.lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert wiki_ingest.main() == 1
+    assert ran == []
+    assert "already running" in pushed[0]
+    # Released, the next run goes ahead.
+    assert wiki_ingest.main() == 0
+    assert ran == [1]
+
+
 def test_main_leaves_a_run_note_in_the_vault(vault, monkeypatch):
     monkeypatch.setattr(wiki_ingest, "run_agent", _stages(pages=[
         {"name": "alpha", "action": "create", "intent": "x", "section": "S"},
