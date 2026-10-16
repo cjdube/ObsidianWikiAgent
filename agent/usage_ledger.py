@@ -180,6 +180,16 @@ def _prune(path: Path) -> None:
 
     days = _env_int("WIKI_USAGE_RETENTION_DAYS", _DEFAULT_RETENTION_DAYS)
     cutoff = datetime.now() - timedelta(days=days)
+    # 90 days of rows is ~8 MB, more than the cap, so the size test alone
+    # rewrote the whole file on every call while dropping almost nothing. Wait
+    # until the oldest row is a day past the cutoff: at most one rewrite a day.
+    with open(path, encoding="utf-8") as fh:
+        first = fh.readline()
+    try:
+        if datetime.fromisoformat(json.loads(first)["ts"]) >= cutoff - timedelta(days=1):
+            return
+    except Exception:
+        pass  # an unreadable first row says nothing about age; prune as before
     kept = [
         line
         for line in path.read_text(encoding="utf-8").splitlines()

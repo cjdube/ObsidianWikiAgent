@@ -267,6 +267,24 @@ def test_the_prune_keeps_recent_rows_and_drops_old_ones(monkeypatch):
     assert len(written) == 2
 
 
+def test_the_prune_does_not_rewrite_a_file_with_nothing_old(monkeypatch):
+    # Over the cap but every row inside retention: rewriting would drop
+    # nothing, and used to happen on every call.
+    monkeypatch.setenv("WIKI_USAGE_MAX_BYTES", "1")
+    monkeypatch.setenv("WIKI_USAGE_RETENTION_DAYS", "30")
+    recent = (datetime.now() - timedelta(days=29)).isoformat(timespec="seconds")
+    path = usage_ledger.ledger_path()
+    path.write_text(json.dumps({"ts": recent, "agent": "wiki"}) + "\n",
+                    encoding="utf-8")
+    inode = path.stat().st_ino
+
+    usage_ledger.record(task="t", caller="run", backend="ollama", model="m",
+                        duration_ms=1)
+
+    assert path.stat().st_ino == inode
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
 def test_the_suite_never_writes_the_real_ledger(monkeypatch):
     """tests/conftest.py redirects agent.common.LOGS_DIR, and ledger_path()
     resolves against it per call rather than binding it at import.
