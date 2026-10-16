@@ -120,20 +120,24 @@ MAX_DEEP_ITERATIONS = 120
 # whole run budget without finishing anything, and a longer budget makes that
 # worse rather than better. These bound the wedge at one page.
 #
-# 120s is well clear of any page measured so far, and a page past it is stuck
-# rather than slow. On qwen3.8:27b-mlx: 70 real pages with a second model
-# resident on the GPU gave mean 17.1s, median 13.5s, slowest 61.1s; the whole
-# 569-page vault on an idle GPU gave mean 10.0s, median 7.6s, slowest 83.8s.
-# The idle box is faster on average and has the worse tail, so the headroom
-# above the slowest page is 1.4x, not the 2x the contended numbers suggested.
-# Raise this only against a fresh slowest-page figure, and remember that
-# raising it widens the wedge these two constants exist to bound.
+# 150s is 1.4x the slowest healthy page measured, and the margin stays 1.4x
+# because the idle box has the worse tail. On qwen3.8:27b-mlx: 70 real pages
+# with a second model resident on the GPU gave mean 17.1s, median 13.5s,
+# slowest 61.1s; the whole 569-page vault on an idle GPU gave mean 10.0s,
+# median 7.6s, slowest 83.8s. The ceiling was 120s until the 807-page run of
+# 2026-10-11: 'ibis-framework' took 101.5s and finished normally with a CLEAN
+# verdict. Its prompt was the same 3,921 tokens as the week it took 4.9s; the
+# reply grew from 92 to 2,937 tokens. So a page past the ceiling is not always
+# stuck: a large page ('wren', 14.8k prompt tokens, 97.0s) and a long reply
+# are both slow and healthy. Raise this only against a fresh slowest-page
+# figure, and remember that raising it widens the wedge these two constants
+# exist to bound.
 #
 # Two retries because a page is one unit of work and there are hundreds of
 # them. The judgment pass gets eight for one conversation; giving each page
 # eight would restore exactly the unbounded product agent/budget.py exists to
 # stop.
-SWEEP_PAGE_CEILING_SECONDS = 120
+SWEEP_PAGE_CEILING_SECONDS = 150
 MAX_SWEEP_RETRIES = 2
 
 LINT_WRAPPER = """

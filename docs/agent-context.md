@@ -312,9 +312,24 @@ window does. That run logged the ≥70% warning from iteration 22 and stopped at
 Plan on 45, not 15. Then the run fills 240 minutes at about **1190 pages**
 (`(240 − 0.9 − 45) min / 9.8s`). Pages grew 625 → 731 in 14 days, 7.6 a day,
 so that is about 60 days after 2026-09-27: **around 2026-11-26**. Re-check
-then. The slowest sweep page, `wren`, went 84.2 → 88.6 → 92.8s against the 120s
-ceiling, with no page-ceiling stop in any of the three runs; look at that
-page's size if it passes about 110s.
+then.
+
+**The sweep page ceiling is 150s, not 120s, since 2026-10-16.** The 807-page
+run of 2026-10-11 had two pages near 120s, and both finished normally. They are
+slow for two different reasons, read from `logs/usage.jsonl`:
+
+| Page | 2026-09-20 | 2026-09-27 | 2026-10-11 | Why it is slow |
+| --- | --- | --- | --- | --- |
+| `wren` | 88.6s | 92.8s (14,056 in / 150 out) | 97.0s (14,762 in / 115 out) | The page is large |
+| `ibis-framework` | 4.9s (3,921 in / 92 out) | 78.6s (3,921 in / 2,153 out) | 101.5s (3,921 in / 2,937 out) | The reply is long; the page did not change |
+
+A page past the ceiling stops the rest of the sweep and skips the judgment
+pass, so a slow but healthy page cost the whole weekly run. 120s cleared
+101.5s by only 1.18x; 150s restores the 1.4x margin. For a slow `wren`, look at
+the page's size. For a slow page with a short prompt, look at the reply length
+in the ledger instead. A tight output cap for the sweep is not the fix: 3 of
+the 8 replies over 1,500 tokens were real findings, and the verdict line comes
+last. Re-check when the slowest page passes about 130s.
 
 **Precision was hand-counted on 2026-09-11, across all nine trials.** Reports
 at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
