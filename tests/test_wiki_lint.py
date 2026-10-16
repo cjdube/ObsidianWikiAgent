@@ -1029,20 +1029,30 @@ def test_a_flagged_page_is_never_left_without_text():
         assert wl._sweep_body(reply)
 
 
-def test_a_page_past_the_ceiling_abandons_the_run(vault, monkeypatch):
+def test_a_wedged_page_dies_at_its_ceiling(monkeypatch):
     """A per-run deadline cannot protect the shared Ollama slot across 569
     separate calls: a server that wedges on call three sits inside the whole
-    budget without finishing anything. The ceiling catches that at one page."""
-    from agent import budget
+    budget without finishing anything. The ceiling catches that at one page.
 
-    _sweep_vault(vault, 2)
-    clock = iter([0.0, wl.SWEEP_PAGE_CEILING_SECONDS + 1])
-    monkeypatch.setattr(wl.time, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(wl, "complete_text", lambda **kw: "VERDICT: CLEAN")
+    It has to be the call's timeout. Checked after the call returned, it never
+    fired on a call that hung, and the wedge ran to OLLAMA_TIMEOUT instead."""
+    import requests
+    from agent import budget, loop
+
+    monkeypatch.setenv("OLLAMA_TIMEOUT", "600")
+    timeouts = []
+
+    def hang(url, json=None, headers=None, timeout=None):
+        timeouts.append(timeout)
+        raise requests.exceptions.ReadTimeout()
+
+    monkeypatch.setattr(loop._session, "post", hang)
+    monkeypatch.setattr(loop.time, "sleep", lambda s: None)
 
     with pytest.raises(budget.BudgetExceeded) as e:
         wl.scope_sweep({"a": "x", "b": "y"}, "rules")
-    assert "'a'" in str(e.value)
+    assert timeouts == [wl.SWEEP_PAGE_CEILING_SECONDS] * (1 + wl.MAX_SWEEP_RETRIES)
+    assert "scope sweep: a" in str(e.value)
 
 
 def test_each_page_gets_its_own_retry_ceiling(vault, monkeypatch):

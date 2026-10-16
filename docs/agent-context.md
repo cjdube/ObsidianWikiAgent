@@ -331,6 +331,15 @@ in the ledger instead. A tight output cap for the sweep is not the fix: 3 of
 the 8 replies over 1,500 tokens were real findings, and the verdict line comes
 last. Re-check when the slowest page passes about 130s.
 
+**The ceiling is now each call's timeout, also since 2026-10-16.** Before that,
+the sweep checked the time only after the call returned. That stopped slow
+pages that finished, but not a call that hung: a hung call ran until
+`OLLAMA_TIMEOUT` (600s), was retried twice, and the page died after about 30
+minutes, not the two minutes the 2026-09-11 note below says. Now
+`scope_sweep` passes `SWEEP_PAGE_CEILING_SECONDS` to `complete_text` as the
+timeout. A hung page dies after three attempts of 150s plus backoff, about 7.6
+minutes. A page that times out once is retried, and the run goes on.
+
 **Precision was hand-counted on 2026-09-11, across all nine trials.** Reports
 at `/tmp/lint-baseline/reports`, `/tmp/lint-listtool/reports` and
 `/tmp/lint-ctx131k/reports` until the box is rebooted. Eighty-five asserted

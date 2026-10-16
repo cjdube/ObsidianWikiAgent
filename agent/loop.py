@@ -991,6 +991,7 @@ def complete_text(
     provider: str = None,
     logger: Optional[logging.Logger] = None,
     think: Optional[bool] = None,
+    timeout: Optional[int] = None,
 ) -> str:
     """Single-turn, tool-free completion — for tasks where the caller
     assembles the surrounding structure itself rather than trusting the
@@ -1001,7 +1002,12 @@ def complete_text(
     Without it a one-shot call is recorded as task "unknown".
 
     think: see _run_ollama. Ollama only — Gemini has no equivalent field, and
-    a caller that sets it against Gemini is silently asking for nothing."""
+    a caller that sets it against Gemini is silently asking for nothing.
+
+    timeout: seconds per attempt, in place of OLLAMA_TIMEOUT or
+    GEMINI_TIMEOUT. The deep lint's scope sweep passes its page ceiling here,
+    because a ceiling checked after the call returns cannot stop a call that
+    never does."""
     name = _provider(provider)
 
     if name == "gemini":
@@ -1018,7 +1024,7 @@ def complete_text(
             model=model,
             caller="complete_text",
             headers={"x-goog-api-key": _gemini_key()},
-            timeout=_gemini_timeout(),
+            timeout=timeout or _gemini_timeout(),
             logger=logger,
         )
         candidates = data.get("candidates") or []
@@ -1050,7 +1056,7 @@ def complete_text(
         backend="ollama",
         model=model,
         caller="complete_text",
-        timeout=int(os.getenv("OLLAMA_TIMEOUT", "300")),
+        timeout=timeout or int(os.getenv("OLLAMA_TIMEOUT", "300")),
         logger=logger,
         num_ctx=options["num_ctx"],
     )

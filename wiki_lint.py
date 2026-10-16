@@ -99,7 +99,7 @@ from agent.wikilinks import (
 # the one Ollama slot — see launchd/local.wikiagent.learnings-lint.plist.
 #
 # Because the number got big it stopped being what catches a wedged server.
-# SWEEP_PAGE_CEILING_SECONDS does that now, in two minutes rather than four
+# SWEEP_PAGE_CEILING_SECONDS does that now, in minutes rather than four
 # hours. This is the outer stop for a run that is merely far slower than it has
 # ever been measured to be.
 DEEP_RUN_BUDGET_MINUTES = 240
@@ -119,6 +119,13 @@ MAX_DEEP_ITERATIONS = 120
 # separate calls, so a server that wedges on call three would sit inside the
 # whole run budget without finishing anything, and a longer budget makes that
 # worse rather than better. These bound the wedge at one page.
+#
+# The ceiling is each call's HTTP timeout, not a check made after the call
+# returns: until 2026-10-16 it was the latter, which stopped slow pages that
+# finished but never a call that hung, so a wedge actually ran 3 x
+# OLLAMA_TIMEOUT (600s), about 30 minutes. Now a wedged page dies after
+# 1 + MAX_SWEEP_RETRIES attempts of SWEEP_PAGE_CEILING_SECONDS plus backoff,
+# about 7.6 minutes, and a page that times out once is retried, not fatal.
 #
 # 150s is 1.4x the slowest healthy page measured, and the margin stays 1.4x
 # because the idle box has the worse tail. On qwen3.8:27b-mlx: 70 real pages
@@ -944,7 +951,8 @@ def scope_sweep(pages: dict[str, str], rules: str,
 
     Runs before the judgment pass because it is the deterministic half of the
     report and reads better first. It is not insurance against the budget: a
-    wedge dies at SWEEP_PAGE_CEILING_SECONDS, and a sweep that legitimately
+    wedged page dies after its retries at SWEEP_PAGE_CEILING_SECONDS each,
+    and a sweep that legitimately
     outruns DEEP_RUN_BUDGET_MINUTES has been sized wrong, not unlucky.
 
     A sweep that does die still hands back what it found. BudgetExceeded is
@@ -978,13 +986,12 @@ def scope_sweep(pages: dict[str, str], rules: str,
                 # there does not transfer: that failure was a model not calling
                 # a tool, and this call offers none.
                 think=False,
+                # Per attempt. A wedge times out, retries against this page's
+                # ceiling from start_source above, and then raises
+                # BudgetExceeded naming the page.
+                timeout=SWEEP_PAGE_CEILING_SECONDS,
             ).strip()
             spent = time.monotonic() - started
-            if spent > SWEEP_PAGE_CEILING_SECONDS:
-                raise budget.BudgetExceeded(
-                    f"scope sweep spent {spent:.0f}s on '{slug}', past the "
-                    f"{SWEEP_PAGE_CEILING_SECONDS}s page ceiling"
-                )
 
             verdict = verdict_of(reply)
             counts[verdict] += 1

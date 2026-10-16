@@ -256,6 +256,23 @@ def test_gemini_calls_honour_their_own_timeout(monkeypatch):
     assert seen["timeout"] == 900
 
 
+def test_complete_text_timeout_overrides_the_provider_default(monkeypatch):
+    """The scope sweep passes its page ceiling here; GEMINI_TIMEOUT must not
+    win over it, or a Gemini sweep would wedge for the env's length."""
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_MODEL", "m")
+    monkeypatch.setenv("GEMINI_TIMEOUT", "900")
+    seen = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        seen["timeout"] = timeout
+        return FakeResp(200, json_data={"candidates": [{"content": {"parts": [{"text": "hi"}]}}]})
+
+    monkeypatch.setattr(loop._session, "post", fake_post)
+    loop.complete_text("s", "u", provider="gemini", timeout=150)
+    assert seen["timeout"] == 150
+
+
 def test_gemini_timeout_defaults_when_unset(monkeypatch):
     monkeypatch.delenv("GEMINI_TIMEOUT", raising=False)
     assert loop._gemini_timeout() == 120
