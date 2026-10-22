@@ -16,15 +16,15 @@
 # It writes the real .plist beside the templates (still gitignored, still local)
 # so you can read what was installed, then bootstraps it.
 #
-# Re-running is safe: an already-loaded job is booted out first. Nothing here
-# runs a job — every template ships RunAtLoad false, so the first run is on
-# schedule. To fire one now: launchctl kickstart -k gui/$(id -u)/<label>
+# Re-running is safe: an already-loaded job is booted out first. Only selfheal
+# runs at install, and it reloads nothing unless stale; the rest ship RunAtLoad
+# false. To fire one now: launchctl kickstart -k gui/$(id -u)/<label>
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
-ALL_JOBS=(ingest lint snapshot)
+ALL_JOBS=(ingest lint snapshot selfheal)
 
 NAME=""
 DRY_RUN=0
@@ -45,7 +45,7 @@ done
 
 if [ -z "$VAULT" ]; then
     echo "usage: $0 [--name LABEL] [--dry-run] <vault-path> [job...]" >&2
-    echo "       jobs: ${ALL_JOBS[*]} (default: ingest snapshot)" >&2
+    echo "       jobs: ${ALL_JOBS[*]} (default: ingest snapshot selfheal)" >&2
     exit 2
 fi
 
@@ -70,7 +70,10 @@ fi
 # lint is opt-in: a weekly audit only earns its keep on a vault too big to read
 # through by hand. It set LLM_PROVIDER=gemini until 2026-09-10, which used to be
 # the reason; the warning below now covers whoever puts it back.
-[ ${#jobs[@]} -gt 0 ] || jobs=(ingest snapshot)
+#
+# selfheal is default because every job execs the venv's interpreter, so a brew
+# upgrade breaks them all; on 2026-10-18 it cost the weekly lint.
+[ ${#jobs[@]} -gt 0 ] || jobs=(ingest snapshot selfheal)
 
 mkdir -p "$AGENTS" "$ROOT/logs"
 
@@ -104,10 +107,13 @@ for job in "${jobs[@]}"; do
         ingest) template="$ROOT/launchd/template.plist.txt" ;;
         lint) template="$ROOT/launchd/template-lint.plist.txt" ;;
         snapshot) template="$ROOT/launchd/template-snapshot.plist.txt" ;;
+        selfheal) template="$ROOT/launchd/template-selfheal.plist.txt" ;;
         *) echo "unknown job: $job (expected: ${ALL_JOBS[*]})" >&2; exit 2 ;;
     esac
 
     label="local.wikiagent.$NAME-$job"
+    # One healer per checkout: it reloads every vault's jobs, so it has no vault.
+    [ "$job" = selfheal ] && label="local.wikiagent.selfheal"
     local_copy="$ROOT/launchd/$label.plist"
 
     # The templates are .txt because they are not valid plists until this runs:

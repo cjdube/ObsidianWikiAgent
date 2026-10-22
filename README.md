@@ -379,8 +379,8 @@ Once a vault is set up and scheduled, this is the actual workflow:
    A vault can audit itself on a schedule too:
    `./launchd/install.sh <vault-path> lint` fills in
    `launchd/template-lint.plist.txt` and loads the job. `lint` has to be asked
-   for by name — `install.sh` with no job named installs `ingest` and
-   `snapshot` only — because the audit is only worth scheduling once a vault
+   for by name — `install.sh` with no job named installs `ingest`,
+   `snapshot` and `selfheal` only — because the audit is only worth scheduling once a vault
    has grown past the point where reading every page by hand is realistic.
    The setup this was built against runs Sunday 22:00 and lands its report in
    `logs/<vault-name>-lint.launchd.log`. Late on purpose: `--deep` sweeps every
@@ -450,20 +450,22 @@ Once a vault is set up and scheduled, this is the actual workflow:
    launchctl list | grep wikiagent
    ```
 
-It installs the `ingest` and `snapshot` jobs by default. The snapshot job
-commits and pushes the vault daily, so it only does anything useful if the
+It installs the `ingest`, `snapshot` and `selfheal` jobs by default.
+`selfheal` is one job per checkout, not per vault; see "After `brew upgrade
+python@3.12`" below. The snapshot job commits and pushes the vault daily, so it only does anything useful if the
 vault has a git remote. Name the jobs explicitly to add the weekly lint:
 
 ```bash
-./launchd/install.sh ~/Vaults/<vault-name> ingest lint snapshot
+./launchd/install.sh ~/Vaults/<vault-name> ingest lint snapshot selfheal
 ```
 
 `lint` is opt-in rather than default because a weekly audit only earns its
 keep once a vault is too big to read through by hand. Like the other two
 templates it sets no `LLM_PROVIDER`, so it runs on the local model.
 
-Nothing runs at install time — every template ships `RunAtLoad` false, so the
-first run is on schedule. To fire one now:
+Only `selfheal` runs at install time, and it changes nothing unless a job is
+stale. Every other template ships `RunAtLoad` false, so its first run is on
+schedule. To fire one now:
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/local.wikiagent.<vault-name>-ingest
@@ -537,6 +539,15 @@ execs it, and re-records the fingerprint. `--check` reports and changes
 nothing; `--quiet` says nothing unless it acts. A job that is currently running
 is skipped, because an ingest routinely takes one to three hours and bouncing
 it would throw that away.
+
+You should not need to run it by hand. `install.sh` installs
+`local.wikiagent.selfheal`, which runs the script with `--quiet` every hour and
+at login, under `/bin/bash` rather than the venv's interpreter, because that
+interpreter is the thing that broke. A repair writes one line to
+`logs/selfheal.launchd.log` and sends one push. Install it on a checkout set up
+before 2026-10-22 with `./launchd/install.sh <vault-path> selfheal`. Without
+it, a reinstall on 2026-10-17 was healed by hand for two jobs and the Sunday
+lint on 2026-10-18 died at launch.
 
 The same upgrade can also revoke the TCC folder grant, which is keyed to the
 interpreter's exact path — see the note above. The script does not fix that

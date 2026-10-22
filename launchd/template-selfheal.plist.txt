@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Reference template for the job that reloads this repo's other jobs after a
+     Homebrew Python upgrade. One per checkout, not per vault: it heals every
+     local.wikiagent.* job at once, so install.sh gives it a fixed label.
+
+     Runs /bin/bash, NOT .venv/bin/python like every other job here. The fault
+     it repairs is launchd refusing to exec that interpreter; a healer run
+     through it would die of the same fault. /bin/bash is Apple-signed and
+     Homebrew never replaces it.
+
+     Hourly, because the healer only helps if it runs between the upgrade and
+     the next scheduled fire. On 2026-10-17 a reinstall was healed by hand for
+     the ingest and the snapshot only, and the Sunday lint died at launch with
+     no log line and no push. RunAtLoad true, so it also runs after a reboot
+     and at install. The quiet flag writes nothing unless it repairs something.
+
+     Do not put two hyphens in a row inside this comment: launchd accepts it,
+     but LocalLLMAgent's dashboard parser drops the job.
+
+     Placeholder to replace:
+       <ABSOLUTE_PATH_TO_REPO>  where you cloned this repo -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.wikiagent.selfheal</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string><ABSOLUTE_PATH_TO_REPO>/launchd/reload-after-upgrade.sh</string>
+        <string>--quiet</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string><ABSOLUTE_PATH_TO_REPO></string>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>StandardOutPath</key>
+    <string><ABSOLUTE_PATH_TO_REPO>/logs/selfheal.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string><ABSOLUTE_PATH_TO_REPO>/logs/selfheal.launchd.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
