@@ -727,6 +727,15 @@ def test_write_wiki_page_creates_a_new_page(vault):
     assert (vault.root / "wiki" / "colima.md").read_text() == "# Colima\n"
 
 
+def test_write_wiki_page_stamps_the_date_the_model_invented(vault):
+    """A source with no date in its name gave eight live pages '2025-05-22'."""
+    wt.write_wiki_page(vault.path, "para",
+                       "# PARA\n\n**Sources**: guide.md\n**Last updated**: 2025-05-22\n")
+    text = (vault.root / "wiki" / "para.md").read_text()
+    assert f"**Last updated**: {date.today().isoformat()}\n" in text
+    assert "2025-05-22" not in text
+
+
 def test_write_wiki_page_overwrites_a_plain_page(vault):
     vault.page("colima", "# Colima\n\nOld.\n")
     wt.write_wiki_page(vault.path, "colima", "# Colima\n\nNew.\n")

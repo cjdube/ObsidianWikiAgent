@@ -811,6 +811,12 @@ def write_wiki_page(vault_path: str, name: str, content: str) -> dict:
         block = _FRONTMATTER_RE.match(path.read_text(encoding="utf-8"))
         if block:
             content = f"{block.group(0)}\n\n{content.lstrip()}"
+    # Today, as edit_wiki_page stamps it. Left to the model, a source with no
+    # date in its name came back '2025-05-22' or '2024-05-22' — the guess
+    # append_log stopped making — and by 2026-10-29 eight pages carried one.
+    content = re.sub(r"^\*\*Last updated\*\*:.*$",
+                     f"**Last updated**: {date.today().isoformat()}",
+                     content, flags=re.MULTILINE)
     atomic_write(path, content)
     return {"written": path.name}
 
