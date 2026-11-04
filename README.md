@@ -216,7 +216,8 @@ it cannot drift apart again without changing this one file.
 
 The pattern excludes backticks and newlines, so a `[[` inside a code span never
 opens a match and one unclosed `[[` never swallows the rest of the page — both
-from an observed failure, and both matching what Obsidian itself renders.
+from an observed failure, and both matching what Obsidian itself renders. A
+whole link inside a code span is text too: the check and every rewrite skip it.
 `link_target` is the other half: `[[foo]]`, `[[foo.md]]`, `[[foo|alias]]` and
 `[[foo#section]]` all mean `foo`.
 

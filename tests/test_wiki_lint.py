@@ -496,22 +496,19 @@ def test_apply_safe_fixes_strips_self_links(vault):
 
 
 def test_check_and_fix_agree_on_a_link_inside_a_code_span(vault):
-    """A complete [[a]] inside backticks is a link to both of them. The
-    backtick exclusion stops a stray `[[` from *opening* a runaway match; it
-    does not exempt a well-formed link that happens to sit in a code span, and
-    the link body here contains no backtick to exclude.
-
-    So the assertion is agreement, not exemption: the check reports it and the
-    fix repairs it. Those two used to run different patterns."""
-    vault.page("a", "# A\n\nThe `[[a]]` syntax links to a page.\n")
+    """A complete [[a]] inside backticks is text, as Obsidian treats it, so the
+    check does not report it and the fix does not touch it. Those two used to
+    run different patterns, and the page must survive --fix byte for byte."""
+    body = "# A\n\nThe `[[a]]` syntax links to a page.\n"
+    vault.page("a", body)
     pages = wl._pages(vault.path)
 
-    assert any("links to itself" in f for f in wl.check_links(pages))
+    assert wl.check_links(pages) == []
 
     changes = wl.apply_safe_fixes(vault.path, pages)
 
-    assert any("a.md" in c for c in changes)
-    assert wl.check_links(wl._pages(vault.path)) == []
+    assert not any("a.md" in c for c in changes)
+    assert (vault.root / "wiki" / "a.md").read_text() == body
 
 
 def test_apply_safe_fixes_strips_a_self_link_after_a_stray_open_bracket(vault):

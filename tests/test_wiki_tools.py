@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent import wiki_tools as wt
-from agent.wikilinks import lowercase_targets
+from agent.wikilinks import delink_broken, linked_page_names, lowercase_targets, strip_links_to
 
 
 # --- path safety -----------------------------------------------------------
@@ -120,6 +120,13 @@ def test_read_raw_file_rejects_hidden_content_not_present_in_the_queue(vault):
         # real link after it, nor may an unclosed [[ cross a line break.
         ("Unclosed `[[` brackets break the [[owa]] linter", {"owa"}),
         ("stray [[ opener\nnext line has [[foo]]", {"foo"}),
+        # A whole link in a code span is literal text, as Obsidian renders it.
+        ("reads `[[foo]]` here", set()),
+        ("reads `see [[foo]] there` and [[bar]]", {"bar"}),
+        ("reads ``a ` [[foo]]`` and [[bar]]", {"bar"}),
+        # A lone backtick opens no span, and a span ends with its line.
+        ("a lone ` then [[foo]]", {"foo"}),
+        ("a lone ` here\nand [[foo]] ` there", {"foo"}),
     ],
 )
 def test_linked_page_names(content, expected):
@@ -1282,17 +1289,17 @@ def test_lowercase_targets_leaves_the_alias_and_anchor_alone():
     )
 
 
-def test_lowercase_targets_matches_what_the_other_link_rewrites_match():
-    """LINK_RE excludes backticks *inside* the brackets — that guard is against
-    an unclosed `[[` running away, not against a whole link wrapped in a code
-    span, which still matches. delink_broken and strip_links_to rewrite such a
-    link too, so this one does as well: a normalise that skipped what they
-    rewrite is the check/fix drift agent/wikilinks.py exists to prevent."""
-    content = "A page reference reads `[[Daily-Chrome-2026-08-22]]` in the source."
-    assert lowercase_targets(content) == (
-        "A page reference reads `[[daily-chrome-2026-08-22]]` in the source.", 1
-    )
-    # The guard LINK_RE does carry: a backtick inside the brackets, no match.
+def test_every_link_rewrite_leaves_a_code_span_alone_and_fixes_the_rest():
+    """A link in a code span is text, not a link. The check and all three
+    rewrites must agree on that: one that still touched the span is the
+    check/fix drift agent/wikilinks.py exists to prevent. Each case also holds
+    a real link, so a rewrite that did nothing at all cannot pass."""
+    code = "`[[Gone]]` and `x [[Gone]] y`"
+    assert linked_page_names(f"{code} and [[real]]") == {"real"}
+    assert lowercase_targets(f"{code} and [[Foo]]") == (f"{code} and [[foo]]", 1)
+    assert delink_broken(f"{code} and [[gone|text]]", {"real"}) == (f"{code} and text", 1)
+    assert strip_links_to(f"{code} and [[Gone]]", "Gone") == (f"{code} and Gone", 1)
+    # A backtick inside the brackets is still no match.
     assert lowercase_targets("Unclosed `[[` brackets and [[Foo]] after") == (
         "Unclosed `[[` brackets and [[foo]] after", 1
     )

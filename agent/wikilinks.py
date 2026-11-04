@@ -14,8 +14,8 @@ fix that repairs it cannot drift apart again without changing this file.
 import re
 from typing import Callable
 
-# A link target never contains a newline or a backtick, and never spans a code
-# span. Both exclusions come from one observed failure: a page whose body reads
+# A link target never contains a newline or a backtick. Both exclusions come
+# from one observed failure: a page whose body reads
 # "Unclosed `[[` brackets can cause the linter to swallow subsequent lines"
 # opened a match at the `[[` inside the backticks, ran past the real
 # [[obsidian-wiki-agent]] link that followed, and closed on its ]] — reporting a
@@ -23,10 +23,21 @@ from typing import Callable
 # genuine link went uncounted, which also makes its target look like an orphan.
 # Excluding backticks stops a code span's [[ from opening a match; excluding
 # newlines keeps one unclosed [[ from consuming the rest of the file.
-#
-# Skipping code spans is also what Obsidian itself does — it does not render a
-# [[link]] inside backticks — so this is the rendered truth, not just a guard.
 LINK_RE = re.compile(r"\[\[([^\]\n`]+)\]\]")
+
+# LINK_RE alone still matches a whole link inside a code span, which Obsidian
+# treats as text. Obsidian's own link list disagreed with this module on exactly
+# that on 2026-11-04, on `[[claude-code]]`. Matching the span first consumes it,
+# so a link inside it is never seen: group 1 is the span's backticks, group 2 a
+# real link's body.
+# shortcut: a span must close on its own line and fenced blocks are not skipped;
+# upgrade if Obsidian's link list disagrees again (no wiki page needs it today).
+_SPAN_OR_LINK_RE = re.compile(rf"(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)|{LINK_RE.pattern}")
+
+
+def _sub_links(repl: Callable[[str], str], content: str) -> str:
+    """Replace each link outside a code span with repl(link body)."""
+    return _SPAN_OR_LINK_RE.sub(lambda m: m[0] if m[1] else repl(m[2]), content)
 
 
 def link_target(inner: str) -> str:
@@ -46,8 +57,8 @@ def linked_page_names(content: str) -> set[str]:
     """Page names linked from `content`, as bare stems."""
     return {
         name
-        for inner in LINK_RE.findall(content)
-        if (name := link_target(inner))
+        for m in _SPAN_OR_LINK_RE.finditer(content)
+        if m[2] and (name := link_target(m[2]))
     }
 
 
@@ -65,14 +76,14 @@ def flatten_links(
     """
     count = 0
 
-    def repl(m: re.Match) -> str:
+    def repl(inner: str) -> str:
         nonlocal count
-        if not should_flatten(link_target(m.group(1))):
-            return m.group(0)
+        if not should_flatten(link_target(inner)):
+            return f"[[{inner}]]"
         count += 1
-        return display_text(m.group(1))
+        return display_text(inner)
 
-    return LINK_RE.sub(repl, content), count
+    return _sub_links(repl, content), count
 
 
 def delink_broken(content: str, valid: set[str]) -> tuple[str, int]:
@@ -124,13 +135,13 @@ def lowercase_targets(content: str) -> tuple[str, int]:
     exists to fix."""
     count = 0
 
-    def repl(m: re.Match) -> str:
+    def repl(inner: str) -> str:
         nonlocal count
-        head, bar, alias = m.group(1).partition("|")
+        head, bar, alias = inner.partition("|")
         stem, hash_, anchor = head.partition("#")
         if stem == stem.lower():
-            return m.group(0)
+            return f"[[{inner}]]"
         count += 1
         return f"[[{stem.lower()}{hash_}{anchor}{bar}{alias}]]"
 
-    return LINK_RE.sub(repl, content), count
+    return _sub_links(repl, content), count
