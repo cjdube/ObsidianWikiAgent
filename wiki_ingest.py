@@ -416,10 +416,11 @@ def _execute_dispatch(
     two must be chosen together — test_every_stage_dispatches_every_tool_it
     _advertises holds them to it.
 
-    The source filename is bound here rather than asked of the model. It is the
-    citation that goes on the page's '**Sources**' line, this function is the
-    only thing that reliably knows it, and RULES.md has a paragraph of rules
-    about writing it correctly that no longer has to be obeyed by anyone.
+    On the update path, the source filename is bound here rather than asked of
+    the model. It is the citation that goes on the page's '**Sources**' line, and
+    this function is the only thing that reliably knows it. write_wiki_page gets
+    no source, so on a new page the model still writes that line, and RULES.md's
+    paragraph on writing it correctly still applies there.
 
     `page` is not bound, because both tools advertise a name and the model has
     to keep sending one — but it is *checked*, and a call naming any other page

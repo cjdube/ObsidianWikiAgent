@@ -22,7 +22,7 @@ Repository-specific guidance for coding agents. The working method below belongs
 - Preserve the staged ingest: plan without writes, execute one isolated conversation per planned page, then write one source-level log entry.
 - Keep the pending-source queue oldest-first so stable filename prefixes cannot starve later sources.
 - Choose create versus update from the page's current existence on disk. Existing pages receive only the edit path; new pages receive only the create path.
-- Keep `**Sources**`, `**Last updated**`, and index descriptions under deterministic Python ownership. Do not move whole-document rewriting back into model prompts.
+- Keep `**Sources**`, `**Last updated**`, and index descriptions under deterministic Python ownership. One exception: a new page's `**Sources**` line is still written by the model. Do not move whole-document rewriting back into model prompts.
 - Keep model-visible catalog and tool results bounded by the answer, not by total vault size. Avoid tools that return an entire growing index or page catalogue when a search or section list will do.
 - One exception, measured 2026-09-11: the deep lint's judgment pass may call `list_wiki_pages`. It is the only pass whose job is the whole vault, a bare name list is 4.9% of the window at 609 pages where the index with summaries is 35%, and withholding it held Tier B recall at 1.0 of 12 against 4.2 with it. The exception is for that one pass and that one tool; the read path keeps search only. Re-measure before widening it, and watch the name list against the window as the vault grows.
 - Preserve the execute stage's verified-link boundary: it may link only to names supplied by the plan. Missing links are lintable; invented links are damage.

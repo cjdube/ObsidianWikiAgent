@@ -574,8 +574,9 @@ def run_agent(
     think: see _run_ollama. Ollama only — Gemini has no equivalent field, and a
            caller that sets it is describing the local model's behaviour, not
            stating a requirement the run should fail without. So it is ignored
-           there rather than raising: the weekly `wiki_lint --deep` pass sets
-           LLM_PROVIDER=gemini in its own .plist and shares this entry point.
+           there rather than raising: `wiki_lint --deep` shares this entry point,
+           and a person can run it with LLM_PROVIDER=gemini. The installed job
+           does not set that key; see launchd/template-lint.plist.txt.
     """
     name = _provider(provider)
     if name == "gemini":
