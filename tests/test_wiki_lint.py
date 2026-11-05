@@ -303,6 +303,13 @@ def test_check_slug_typos_flags_the_misspelled_slug():
     assert any("looks like a typo" in f for f in findings)
 
 
+def test_check_slug_typos_flags_a_space_in_the_name():
+    # Separators reduce to nothing in _letters, so the title comparison passes.
+    findings = wl.check_slug_typos({"eight kindreds": good_page(title="Eight Kindreds")})
+    assert len(findings) == 1
+    assert "eight-kindreds.md" in findings[0]
+
+
 @pytest.mark.parametrize(
     "slug,title",
     [

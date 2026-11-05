@@ -304,6 +304,26 @@ def test_plan_drops_a_duplicate_page(vault):
     assert plan.names() == ["ollama"]
 
 
+def test_plan_turns_spaces_in_a_new_page_name_into_hyphens(vault):
+    """The real 2026-11-04 name. Names that differ only by a space are one page."""
+    plan = wiki_ingest._Plan()
+    wiki_ingest._plan_dispatch(vault.path, plan)["submit_plan"](pages=[
+        {"name": "Daily Chrome 2026-10-24", "action": "create", "intent": "x", "section": "S"},
+        {"name": "daily-chrome-2026-10-24", "action": "create", "intent": "y", "section": "S"},
+    ])
+    assert plan.names() == ["Daily-Chrome-2026-10-24"]
+
+
+def test_plan_keeps_the_name_of_a_page_that_already_has_a_space(vault):
+    """Renaming it here would send the update to a new, second page."""
+    (Path(vault.path) / "wiki" / "eight kindreds.md").write_text("# Eight Kindreds\n")
+    plan = wiki_ingest._Plan()
+    wiki_ingest._plan_dispatch(vault.path, plan)["submit_plan"](pages=[
+        {"name": "eight kindreds", "action": "update", "intent": "x", "section": "S"},
+    ])
+    assert plan.names() == ["eight kindreds"]
+
+
 def test_plan_defaults_an_unclear_action_to_update(vault):
     """Guessing 'update' costs a read of a page that may not exist, which comes
     back as a plain not-found. Guessing 'create' skips the read and overwrites a

@@ -323,7 +323,7 @@ class _Plan:
         return [p["name"] for p in self.pages]
 
 
-def _clean_plan_pages(pages) -> list[dict]:
+def _clean_plan_pages(vault_path: str, pages) -> list[dict]:
     """Keep the entries that are safe to act on, drop the rest silently.
 
     Stage 2 turns each entry straight into a write, so a malformed entry is not
@@ -351,6 +351,11 @@ def _clean_plan_pages(pages) -> list[dict]:
         stem = name[:-3] if name.endswith(".md") else name
         if not stem or "/" in stem or "\\" in stem or stem.startswith("."):
             continue
+        # A title planned as a name ('Daily Chrome 2026-10-24') made a file with
+        # spaces on 2026-09-19 and 2026-11-04. A page already named that way
+        # keeps its name, or an update to it would create a second page.
+        if not page_exists(vault_path, stem):
+            stem = re.sub(r"\s+", "-", stem)
         if f"{stem}.md".lower() in RESERVED:
             continue
         if stem.lower() in seen:
@@ -376,7 +381,7 @@ def _plan_dispatch(vault_path: str, plan: _Plan) -> dict:
     """Stage 1's tools. submit_plan captures rather than writes — this stage
     touches nothing, which is what makes --plan-only safe by construction."""
     def _submit_plan(pages=None, skipped="", **_ignored):
-        cleaned = _clean_plan_pages(pages)
+        cleaned = _clean_plan_pages(vault_path, pages)
         if not cleaned:
             return {"error": "no usable pages in the plan — every entry needs a "
                              "name, and index/log cannot be planned"}

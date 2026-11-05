@@ -481,6 +481,12 @@ def check_slug_typos(pages: dict[str, str]) -> list[str]:
     """
     findings = []
     for slug, content in sorted(pages.items()):
+        # _letters ignores separators, so the comparison below cannot see this.
+        if re.search(r"\s", slug):
+            findings.append(
+                f"{slug}.md has a space in its name. Rename it to "
+                f"{'-'.join(slug.split())}.md and update the links to it."
+            )
         title = _title(content)
         if not title:
             continue
