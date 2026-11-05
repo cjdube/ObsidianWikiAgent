@@ -309,7 +309,9 @@ Once a vault is set up and scheduled, this is the actual workflow:
    marked done only when **every page its plan named actually landed** and the
    `log.md` entry closing out the source was written. A run that wrote some of
    its pages and then died leaves the source unmarked, so the next run redoes
-   it in full. If the local model reads a file but returns without writing
+   it in full. That redo plans again from scratch, so it can restate material
+   on the pages the first attempt wrote, and lint cannot see this. Read the
+   diff after a redo. If the local model reads a file but returns without writing
    anything at all (a transient no-op that happens on dense sources), the run
    re-attempts it a few times, then leaves it for the next scheduled run — so a
    stuck file clears itself without intervention.
