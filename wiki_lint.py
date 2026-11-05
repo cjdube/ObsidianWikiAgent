@@ -56,6 +56,7 @@ import json
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 from agent import budget
@@ -437,6 +438,8 @@ def _cited_sources(sources: str, raw: set[str]) -> list[str]:
 def _letters(s: str) -> str:
     """A name reduced to its letters and digits, for comparing a slug against a
     title without tripping over how each spells the gaps between words."""
+    # NFKC first, so the title 'Harness²' matches the slug 'harness-2'.
+    s = unicodedata.normalize("NFKC", s)
     return re.sub(r"[^a-z0-9]", "", s.lower().replace("&", "and"))
 
 
