@@ -345,7 +345,11 @@ Once a vault is set up and scheduled, this is the actual workflow:
    so the old failure — marked complete on the strength of one write — cannot
    happen any more. This is the backstop for the case the *plan* was wrong: a
    dated capture that owes a page named after it and does not have one is
-   reported here. Re-run it by removing its name from `wiki/.ingested.json`.
+   reported here. Read that day's note in `runs/` before acting: a finished run
+   can give the dated page another name, and then the fix is to rename that
+   page. Re-run the source by removing its name from `wiki/.ingested.json` only
+   when material is missing, and read the diff after, because a redo can
+   restate material (see step 3).
 
    Add `--deep` for the checks code can't do — contradictions between pages,
    one concept split across two names, out-of-scope pages, and claims a newer

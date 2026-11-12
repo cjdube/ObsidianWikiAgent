@@ -775,9 +775,14 @@ def check_source_coverage(
             continue
         if _letters(stem) not in named:
             findings.append(
+                # Not "stopped early": on 2026-11-06 a finished run named the
+                # dated page from the source's H1, and a re-run would restate it.
                 f"{name} is recorded as ingested but has no page named after "
-                f"it — the ingest stopped early and marked it done anyway. "
-                f"Remove it from wiki/.ingested.json to re-run it."
+                f"it. Read that run's note in runs/ first. If its dated page "
+                f"exists under another name, rename that page to "
+                f"{stem.lower()}. Re-run the source only if material is "
+                f"missing, and read the diff after: a re-run plans again and "
+                f"can restate what is already there."
             )
     return findings
 
