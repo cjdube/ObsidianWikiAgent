@@ -1324,3 +1324,14 @@ def test_a_landed_page_that_later_failed_is_not_reported_twice(vault, monkeypatc
     assert source.status == ABANDONED
     assert source.failed == ["alpha"]
     assert source.created == []
+
+
+def test_a_retried_attempt_logs_at_info_not_warning(caplog):
+    """A failed attempt is a step: ~95% of first-attempt misses recovered on a
+    later attempt (2026-11-04 to 11-17). The caller warns when all of them fail."""
+    import logging
+    with caplog.at_level(logging.DEBUG):
+        ok = wiki_ingest._attempt("x", logging.getLogger("t"), lambda nudge: False, "tool")
+    assert ok is False
+    assert [r for r in caplog.records if "did nothing" in r.message]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

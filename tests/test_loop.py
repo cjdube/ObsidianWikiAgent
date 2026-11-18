@@ -618,7 +618,8 @@ def test_no_warning_when_the_prompt_fits_comfortably(monkeypatch):
 
 def test_warns_when_a_reply_stops_at_the_cap(monkeypatch):
     """A capped reply that says nothing trades a loud failure for a quiet
-    wrong answer — a half-written page looks like a finished one."""
+    wrong answer — a half-written page looks like a finished one. complete_text
+    is the path where the cut text is returned as the answer."""
     monkeypatch.setenv("OLLAMA_NUM_PREDICT", "2000")
     monkeypatch.setattr(
         loop, "_post_with_retry",
@@ -630,7 +631,7 @@ def test_warns_when_a_reply_stops_at_the_cap(monkeypatch):
     )
     logger = _Recorder()
 
-    loop.run_agent("sys", "user", tools=[], dispatch={}, provider="ollama", logger=logger)
+    loop.complete_text("sys", "user", provider="ollama", logger=logger)
 
     assert any("num_predict=2000" in w for w in logger.warnings)
     assert any("23808" in w for w in logger.warnings)
@@ -1007,16 +1008,15 @@ def test_a_gemini_reply_cut_off_before_any_tool_call_is_not_a_final_answer(monke
     assert "cut off" in said[1]["parts"][0]["text"], "Gemini wants parts, not content"
 
 
-def test_a_refused_tool_call_is_logged_at_warning(caplog):
-    """The log runs to thousands of INFO lines, so a call the dispatch refused
-    was invisible in the successful ones around it. It is not fatal — the model
-    is handed the error and usually recovers — but it is the trail a stuck stage
-    leaves, and it should read as one."""
+def test_a_refused_tool_call_is_logged_at_info(caplog):
+    """A refused call is a step: the model is handed the error and recovers in
+    most runs. At WARNING it was ~70 lines a day in Wren's 8am rollup
+    (2026-11-04 to 11-17); the stage that finally fails warns on its own."""
     with caplog.at_level(logging.DEBUG):
         loop._dispatch_tool("nope", {}, {}, logging.getLogger("t"))
 
     levels = {r.levelno for r in caplog.records if "tool_call nope" in r.message}
-    assert levels == {logging.WARNING}
+    assert levels == {logging.INFO}
 
 
 def test_a_successful_tool_call_stays_at_info(caplog):

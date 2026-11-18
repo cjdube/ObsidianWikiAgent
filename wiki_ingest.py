@@ -715,7 +715,8 @@ def _attempt(what: str, logger, run, tool: str) -> bool:
                 f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} of {what} raised: {e}"
             )
             continue
-        logger.warning(
+        # INFO: a retry usually recovers; each caller warns if all attempts fail.
+        logger.info(
             f"Attempt {attempt}/{MAX_INGEST_ATTEMPTS} of {what} did nothing "
             "(model returned without calling the tool it was asked for)."
         )

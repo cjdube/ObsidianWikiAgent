@@ -123,7 +123,8 @@ INCOMPLETE_PREFIX = "[incomplete:"
 def _incomplete(max_iterations: int, logger: Optional[logging.Logger]) -> str:
     """The both-providers answer when the loop runs out of iterations."""
     if logger:
-        logger.warning(
+        # INFO: every caller checks INCOMPLETE_PREFIX and logs its own failure.
+        logger.info(
             f"agent loop exceeded max_iterations={max_iterations} without a "
             "final answer — returning best-effort partial result"
         )
@@ -234,16 +235,14 @@ def _dispatch_tool(
         except Exception as e:
             result = {"error": f"tool '{fn_name}' raised: {e}"}
     if logger:
-        # A refused call is logged at WARNING so it carries the level its
-        # content already claims. These are not fatal — the model is handed the
-        # error and usually recovers — but they are the trail a stuck stage
-        # leaves, and at INFO they were indistinguishable from the successful
-        # calls around them in a log that runs to thousands of lines.
-        line = (
+        # A refused call is a step, not a failure: the model is handed the
+        # error and usually recovers. INFO, so Wren's 8am rollup stays quiet;
+        # the stage that finally fails logs its own WARNING. Grep '"error"' to
+        # find the trail a stuck stage leaves.
+        logger.info(
             f"tool_call {fn_name}({_clip_values(fn_args)}) -> "
             f"{json.dumps(_clip_values(result))}"
         )
-        logger.warning(line) if "error" in result else logger.info(line)
     return result
 
 
@@ -275,7 +274,7 @@ def _truncated_call(
     a shorter page, not a re-send.
     """
     if logger:
-        logger.warning(
+        logger.info(
             f"Refused a truncated '{fn_name}' call — the reply hit {cap} "
             f"mid-call, so its arguments are incomplete. Not running it."
         )
@@ -312,7 +311,7 @@ def _truncated_reply_nudge(logger: Optional[logging.Logger], cap: str) -> str:
     model try again shorter — the turn is not over.
     """
     if logger:
-        logger.warning(
+        logger.info(
             f"Reply was cut off at {cap} before any tool call — nudging the "
             f"model to answer shorter rather than treating the empty reply as "
             f"a final answer."
@@ -815,7 +814,8 @@ def _run_ollama(
             tools_offered=len(tools),
         )
         _log_prompt_size(data, iteration + 1, options["num_ctx"], logger)
-        _warn_if_reply_hit_the_cap(data, logger)
+        # No cap warning here: in the loop a cut reply is always nudged or
+        # refused below, never returned as the answer.
         message = data["message"]
         messages.append(message)
 
