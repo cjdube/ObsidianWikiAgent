@@ -311,7 +311,18 @@ def test_plan_turns_spaces_in_a_new_page_name_into_hyphens(vault):
         {"name": "Daily Chrome 2026-10-24", "action": "create", "intent": "x", "section": "S"},
         {"name": "daily-chrome-2026-10-24", "action": "create", "intent": "y", "section": "S"},
     ])
-    assert plan.names() == ["Daily-Chrome-2026-10-24"]
+    assert plan.names() == ["daily-chrome-2026-10-24"]
+
+
+def test_plan_names_a_page_the_way_its_file_is_named(vault):
+    """The file is lower-case, so the run note must not say
+    'AI-Chat-Learnings-2026-11-13' (runs/2026-11-14.md) for
+    ai-chat-learnings-2026-11-13.md."""
+    plan = wiki_ingest._Plan()
+    wiki_ingest._plan_dispatch(vault.path, plan)["submit_plan"](pages=[
+        {"name": "AI-Chat-Learnings-2026-11-13", "action": "create", "intent": "x", "section": "S"},
+    ])
+    assert plan.names() == ["ai-chat-learnings-2026-11-13"]
 
 
 def test_plan_keeps_the_name_of_a_page_that_already_has_a_space(vault):

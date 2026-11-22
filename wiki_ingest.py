@@ -356,6 +356,9 @@ def _clean_plan_pages(vault_path: str, pages) -> list[dict]:
         # keeps its name, or an update to it would create a second page.
         if not page_exists(vault_path, stem):
             stem = re.sub(r"\s+", "-", stem)
+        # The file is always lower-case (_safe_page_path), so the name the run
+        # note, the log and the sibling links carry should be too.
+        stem = stem.lower()
         if f"{stem}.md".lower() in RESERVED:
             continue
         if stem.lower() in seen:
