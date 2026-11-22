@@ -380,11 +380,51 @@ def _clean_plan_pages(vault_path: str, pages) -> list[dict]:
     return cleaned[:MAX_PLANNED_PAGES]
 
 
-def _plan_dispatch(vault_path: str, plan: _Plan) -> dict:
+# Same test as wiki_lint's _DATED_LOG: a source whose name ends in a date is a
+# dated capture, and RULES.md gives it a page named after the source.
+_DATED_SOURCE = re.compile(r"-(\d{4}-\d{2}-\d{2})$")
+
+
+def _letters(s: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _bind_dated_page(vault_path: str, filename: str, pages: list[dict]) -> list[dict]:
+    """Give a dated source's own page the source's name, when the model
+    spelled it another way.
+
+    The model names that page by hand, and twice got it wrong on a finished
+    run: 'activity-on-2026-11-04' from the source's H1 (2026-11-06), and
+    'wren-nudge-bbdnd0dpsiq' for BbDdn0DpSIQ (2026-11-16). Both left a
+    source-coverage finding and a page to rename by hand.
+
+    Only one shape is fixed: no entry already matches the source (compared by
+    letters, as the lint does), and exactly one entry carries the source's
+    date, is not on disk, and is not another raw source's dated page. A plan
+    with no such entry is left alone — replayed over 310 logged plans on
+    2026-11-22, those were all repair runs whose dated page already existed.
+    The same replay renamed the 2 real mistakes and nothing else.
+    """
+    stem = Path(filename).stem
+    dated = _DATED_SOURCE.search(stem)
+    if not dated or any(_letters(p["name"]) == _letters(stem) for p in pages):
+        return pages
+    others = {_letters(Path(f).stem) for f in list_raw_files(vault_path)["files"]}
+    found = [p for p in pages
+             if dated.group(1) in p["name"]
+             and not page_exists(vault_path, p["name"])
+             and _letters(p["name"]) not in others]
+    if len(found) == 1:
+        found[0]["name"] = re.sub(r"[^a-z0-9]+", "-", stem.lower()).strip("-")
+    return pages
+
+
+def _plan_dispatch(vault_path: str, plan: _Plan, filename: str = "") -> dict:
     """Stage 1's tools. submit_plan captures rather than writes — this stage
     touches nothing, which is what makes --plan-only safe by construction."""
     def _submit_plan(pages=None, skipped="", **_ignored):
-        cleaned = _clean_plan_pages(vault_path, pages)
+        cleaned = _bind_dated_page(
+            vault_path, filename, _clean_plan_pages(vault_path, pages))
         if not cleaned:
             return {"error": "no usable pages in the plan — every entry needs a "
                              "name, and index/log cannot be planned"}
@@ -741,7 +781,7 @@ def _plan_source(vault_path: str, filename: str, rules: str, logger) -> _Plan:
                 "create or update." + nudge
             ),
             tools=PLAN_TOOL_SCHEMAS,
-            dispatch=_plan_dispatch(vault_path, plan),
+            dispatch=_plan_dispatch(vault_path, plan, filename),
             logger=logger,
             max_iterations=MAX_PLAN_ITERATIONS,
         )

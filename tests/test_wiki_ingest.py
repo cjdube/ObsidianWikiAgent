@@ -325,6 +325,61 @@ def test_plan_names_a_page_the_way_its_file_is_named(vault):
     assert plan.names() == ["ai-chat-learnings-2026-11-13"]
 
 
+def _plan_for(vault, filename, *entries):
+    plan = wiki_ingest._Plan()
+    wiki_ingest._plan_dispatch(vault.path, plan, filename)["submit_plan"](pages=[
+        {"name": n, "action": a, "intent": "x", "section": "S"} for n, a in entries
+    ])
+    return plan.names()
+
+
+def test_a_dated_page_named_from_the_h1_takes_the_source_name(vault):
+    """The real 2026-11-06 plan: the dated page was named from the source's H1."""
+    vault.raw("Wren-Nudge-mCAwhsziinU-2026-11-04.md")
+    assert _plan_for(
+        vault, "Wren-Nudge-mCAwhsziinU-2026-11-04.md",
+        ("activity-on-2026-11-04", "create"), ("obsidian-cli", "update"),
+    ) == ["wren-nudge-mcawhsziinu-2026-11-04", "obsidian-cli"]
+
+
+def test_a_misspelled_dated_page_takes_the_source_name(vault):
+    """The real 2026-11-16 plan: two letters of the id swapped."""
+    vault.raw("Wren-Nudge-BbDdn0DpSIQ-2026-11-13.md")
+    assert _plan_for(
+        vault, "Wren-Nudge-BbDdn0DpSIQ-2026-11-13.md",
+        ("wren-nudge-bbdnd0dpsiq-2026-11-13", "create"),
+    ) == ["wren-nudge-bbddn0dpsiq-2026-11-13"]
+
+
+def test_a_dated_page_that_matches_by_letters_is_left_alone(vault):
+    """The lint compares by letters, so '_q' planned as '-q' is not a miss."""
+    assert _plan_for(
+        vault, "Wren-Nudge-KOJcbLUqt_Q-2026-11-04.md",
+        ("wren-nudge-kojcbluqt-q-2026-11-04", "create"),
+        ("activity-on-2026-11-04", "create"),
+    ) == ["wren-nudge-kojcbluqt-q-2026-11-04", "activity-on-2026-11-04"]
+
+
+def test_a_dated_page_is_not_renamed_onto_a_page_on_disk_or_another_source(vault):
+    """An update to another day's existing page, or the dated page of another
+    raw source from the same day, is not this source's page."""
+    vault.page("daily-work-2026-11-20", "# x\n")
+    vault.raw("Daily-Chrome-2026-11-20.md")
+    names = [("daily-work-2026-11-20", "update"), ("daily-chrome-2026-11-20", "create")]
+    assert _plan_for(vault, "AI-Chat-Learnings-2026-11-20.md", *names) == [n for n, _ in names]
+
+
+def test_two_dated_candidates_are_left_for_the_lint(vault):
+    """Guessing between two would rename a real page half the time."""
+    names = [("activity-on-2026-11-04", "create"), ("notes-2026-11-04", "create")]
+    assert _plan_for(vault, "Wren-Nudge-x-2026-11-04.md", *names) == [n for n, _ in names]
+
+
+def test_an_undated_source_is_left_alone(vault):
+    assert _plan_for(vault, "enter-the-game.md", ("field-2026-11-04", "create")) == [
+        "field-2026-11-04"]
+
+
 def test_plan_keeps_the_name_of_a_page_that_already_has_a_space(vault):
     """Renaming it here would send the update to a new, second page."""
     (Path(vault.path) / "wiki" / "eight kindreds.md").write_text("# Eight Kindreds\n")
