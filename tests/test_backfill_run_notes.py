@@ -72,14 +72,15 @@ def test_the_dispatched_tool_decides_create_or_update_not_the_plan():
     assert run.sources["s.md"].updated == ["beta"]
 
 
-def test_a_refused_tool_call_does_not_decide_the_kind():
-    """A call that comes back an error is logged at WARNING and wrote nothing.
-    Letting it set the kind would label the next landed page from the wrong
-    tool."""
+@pytest.mark.parametrize("level", ["WARNING", "INFO"])
+def test_a_refused_tool_call_does_not_decide_the_kind(level):
+    """A call that comes back an error wrote nothing. Letting it set the kind
+    would label the next landed page from the wrong tool. Refused calls logged
+    at WARNING until 99383d2 and at INFO since; both must be skipped."""
     run = _one(_lines(
         _ingesting("s.md"),
         _write("alpha", "s.md", at="09:01:00"),
-        "2026-09-11 09:01:02,000 [WARNING] tool_call edit_wiki_page({'name': 'alpha'}) "
+        f"2026-09-11 09:01:02,000 [{level}] tool_call edit_wiki_page({{'name': 'alpha'}}) "
         '-> {"error": "not this step\'s page"}\n',
         _wrote("alpha", "s.md", at="09:01:04"),
         COMPLETE,

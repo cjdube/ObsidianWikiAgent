@@ -35,8 +35,8 @@ WHAT IT READS, AND WHY EACH LINE IS TRUSTWORTHY
   update. The *plan's* action is a guess that _execute_unit overwrites from
   disk, and the "Plan for" line is logged before that correction, so the plan
   line is not usable for this. The dispatched tool is: a page that exists is
-  given only the edit path and a new one only the create path. Error results
-  are logged at WARNING, so only INFO lines count.
+  given only the edit path and a new one only the create path. A call whose
+  result is an error wrote nothing, so it does not count, at either level.
 - `Wrote 'p' for 'X'` — the write landed; the tool seen just above it says
   which kind it was. `No write from 'p' for 'X'` is a spent attempt and is
   ignored, because a later attempt for the same page may still have landed.
@@ -73,7 +73,9 @@ _TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3} \[(\w+)\] (.*)$"
 _START = re.compile(r"^Starting wiki ingest run for vault: (\S+) \(budget ([\d.]+) min\)")
 _BINARIES = re.compile(r"^Skipping \d+ binary source\(s\) in raw/ — [^:]+: (.+)$")
 _INGESTING = re.compile(r"^Ingesting '(.+?)'$")
-_TOOL = re.compile(r"^tool_call (write_wiki_page|edit_wiki_page)\(")
+# A call whose result is an error wrote nothing. Matched on the result, not
+# the level: refused calls logged at WARNING until 99383d2, at INFO since.
+_TOOL = re.compile(r'^tool_call (write_wiki_page|edit_wiki_page)\((?!.*-> \{.*"error": )')
 _WROTE = re.compile(r"^Wrote '(.+?)' for '(.+?)': ")
 _NO_PLAN = re.compile(r"^No usable plan for '(.+?)'")
 _PARTIAL = re.compile(r"^'(.+?)': \d+/\d+ planned page\(s\) written; failed on (.+?)\.")
@@ -121,7 +123,7 @@ def parse(lines) -> list[_Run]:
         m = _TS.match(line.rstrip("\n"))
         if not m:
             continue  # a continuation line of a multi-line record
-        stamp, level, body = m.group(1), m.group(2), m.group(3)
+        stamp, body = m.group(1), m.group(3)
         when = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
 
         start = _START.match(body)
@@ -134,13 +136,10 @@ def parse(lines) -> list[_Run]:
         if run is None:
             continue  # a rotated log that begins mid-run
 
-        if level == "INFO":
-            found = _TOOL.match(body)
-            if found:
-                # Only INFO. A refused call is logged at WARNING and wrote
-                # nothing, and counting it would name the wrong kind of write.
-                tool = found.group(1)
-                continue
+        found = _TOOL.match(body)
+        if found:
+            tool = found.group(1)
+            continue
 
         wrote = _WROTE.match(body)
         if wrote:

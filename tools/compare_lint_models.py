@@ -76,7 +76,9 @@ INCOMPLETE = "[incomplete"
 
 # setup_logger mirrors every record to stdout, so one subprocess capture holds
 # the report, the tool-call timeline and the context-fill warnings together.
-_TOOL_CALL = re.compile(r"\[INFO\] tool_call (\w+)\(")
+# Calls that ran. A refused call is excluded by its result, not its level:
+# it logged at WARNING until 99383d2 and at INFO since.
+_TOOL_CALL = re.compile(r'\[(?:INFO|WARNING)\] tool_call (\w+)\((?!.*-> \{.*"error": )')
 _CONTEXT_FILL = re.compile(r"\((\d+)% of num_ctx=(\d+)\)")
 # wiki_lint._coverage_line. The judgment pass samples the vault, and this is
 # the size of the sample — the number a coverage change has to move.

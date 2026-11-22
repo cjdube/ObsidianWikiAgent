@@ -243,6 +243,18 @@ def test_metrics_read_tool_calls_and_peak_context_from_stdout():
     assert metrics["completed"] is True
 
 
+@pytest.mark.parametrize("level", ["WARNING", "INFO"])
+def test_a_refused_tool_call_is_not_counted(level):
+    """tool_calls counts calls that ran. Refused calls logged at WARNING until
+    99383d2 and at INFO since, so the count must not depend on the level."""
+    stdout = (
+        "2026-09-10 10:00:00,100 [INFO] tool_call read_wiki_page({'name': 'a'}) -> {}\n"
+        f"2026-09-10 10:00:01,100 [{level}] tool_call read_wiki_page({{'name': 'zz'}}) "
+        '-> {"error": "no wiki page named \'zz\'"}\n'
+    )
+    assert clm.run_metrics(stdout)["tool_calls"] == 1
+
+
 def test_an_incomplete_run_is_not_counted_as_completed():
     """An [incomplete] judgment pass produced no report at all — that is what
     Gemini did in three of three runs at a cap of 60. It is a failure to
